@@ -1,0 +1,166 @@
+/*
+ * OiiOii.ai Design Tokens — Dark Animation Studio Language
+ * Base: deep black #0A0A0B, neon accents #7C3AED (violet) / #22D3EE (cyan)
+ * 16px rounded cards, 1px #FFFFFF14 borders, 40px motion-safe transitions
+ */
+
+:root {
+  /* ===== Color — Base surfaces ===== */
+  --color-base-0: #0A0A0B;          /* app background — deep black */
+  --color-base-1: #111114;          /* card surface */
+  --color-base-2: #16161B;          /* elevated surface */
+  --color-base-3: #1C1C22;          /* hover surface */
+  --color-base-4: #232329;          /* active surface */
+
+  /* ===== Color — Neon accents ===== */
+  --color-accent-violet: #7C3AED;   /* primary brand neon */
+  --color-accent-violet-soft: #8B5CF6;
+  --color-accent-violet-glow: rgba(124, 58, 237, 0.35);
+  --color-accent-cyan: #22D3EE;     /* secondary brand neon */
+  --color-accent-cyan-soft: #67E8F9;
+  --color-accent-cyan-glow: rgba(34, 211, 238, 0.30);
+  --color-accent-magenta: #F472B6;  /* tertiary — used for status/alerts */
+  --color-accent-amber: #FBBF24;    /* credits / bento highlight */
+  --color-accent-emerald: #34D399;  /* success / approve */
+  --color-accent-rose: #FB7185;     /* error / re-roll */
+
+  /* ===== Color — Text ===== */
+  --color-text-primary: #F5F5F7;   /* primary copy */
+  --color-text-secondary: #A1A1AA;  /* secondary copy */
+  --color-text-tertiary: #71717A;   /* muted labels */
+  --color-text-inverse: #0A0A0B;    /* on-neon text */
+
+  /* ===== Color — Borders ===== */
+  --color-border-subtle: rgba(255, 255, 255, 0.08);  /* #FFFFFF14 */
+  --color-border-default: rgba(255, 255, 255, 0.14);  /* #FFFFFF24 */
+  --color-border-strong: rgba(255, 255, 255, 0.22);
+  --color-border-accent: rgba(124, 58, 237, 0.45);
+
+  /* ===== Color — Status ===== */
+  --color-status-pending: #71717A;
+  --color-status-running: #22D3EE;
+  --color-status-approved: #34D399;
+  --color-status-error: #FB7185;
+  --color-status-locked: #FBBF24;
+
+  /* ===== Typography ===== */
+  --font-family-display: "Inter", "SF Pro Display", system-ui, sans-serif;
+  --font-family-body: "Inter", "SF Pro Text", system-ui, sans-serif;
+  --font-family-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+
+  --font-size-xs: 11px;
+  --font-size-sm: 13px;
+  --font-size-md: 15px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+  --font-size-2xl: 28px;
+  --font-size-3xl: 36px;
+  --font-size-4xl: 48px;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  --line-height-tight: 1.15;
+  --line-height-normal: 1.45;
+  --line-height-relaxed: 1.65;
+
+  --letter-spacing-tight: -0.02em;
+  --letter-spacing-normal: 0;
+  --letter-spacing-wide: 0.04em;
+
+  /* ===== Spacing scale (4px base) ===== */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* ===== Radii ===== */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;       /* canonical card radius */
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --radius-full: 9999px;
+
+  /* ===== Borders ===== */
+  --border-width-1: 1px;
+  --border-width-2: 2px;
+  --border-card: 1px solid var(--color-border-subtle);
+  --border-card-hover: 1px solid var(--color-border-accent);
+
+  /* ===== Motion ===== */
+  --motion-fast: 120ms;
+  --motion-normal: 200ms;
+  --motion-slow: 40px;     /* canonical 40px transition baseline */
+  --motion-duration: 400ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ===== Shadows / Glows ===== */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --shadow-glow-violet: 0 0 24px var(--color-accent-violet-glow);
+  --shadow-glow-cyan: 0 0 24px var(--color-accent-cyan-glow);
+
+  /* ===== Layout ===== */
+  --layout-max-width: 1440px;
+  --layout-sidebar-width: 280px;
+  --layout-panel-width: 360px;
+  --layout-tabbar-height: 64px;
+  --layout-header-height: 56px;
+
+  /* ===== Z-index scale ===== */
+  --z-base: 0;
+  --z-content: 10;
+  --z-sticky: 100;
+  --z-canvas: 200;
+  --z-overlay: 1000;
+  --z-modal: 2000;
+  --z-toast: 3000;
+}
+
+/* ===== Motion-safe transitions ===== */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-normal: 0ms;
+    --motion-duration: 0ms;
+  }
+}
+
+/* ===== Semantic token helpers ===== */
+.surface-card {
+  background: var(--color-base-1);
+  border: var(--border-card);
+  border-radius: var(--radius-lg);
+}
+
+.surface-elevated {
+  background: var(--color-base-2);
+  border: var(--border-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.text-glow-violet {
+  color: var(--color-accent-violet-soft);
+  text-shadow: 0 0 12px var(--color-accent-violet-glow);
+}
+
+.text-glow-cyan {
+  color: var(--color-accent-cyan-soft);
+  text-shadow: 0 0 12px var(--color-accent-cyan-glow);
+}

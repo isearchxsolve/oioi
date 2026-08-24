@@ -1,0 +1,299 @@
+import pytest
+from fastapi.testclient import TestClient
+from app.main import app
+from providers.registry import get_registry, reset_registry
+from providers.base import (
+    AIProviderAdapter,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ImageGenerationRequest,
+    ImageGenerationResponse,
+    VideoGenerationRequest,
+    VideoGenerationResponse,
+    ProviderHealth,
+    ProviderStatus,
+    Model,
+)
+
+
+# One JSON payload per crew role. A single union object cannot work: `characters` is List[str] on
+# ScriptwriterOutput but List[Dict[str, Any]] on CharacterDesignerOutput, and `sound_effects` is
+# List[Dict], so the same key means different types to different agents. Each agent is identified by
+# the "You are a <role>" line the orchestrator puts in its system prompt.
+MOCK_AGENT_JSON = {
+    "Scriptwriter": {
+        "title": "Mock Film",
+        "description": "A robot finds a glowing blue flower on a dystopian planet.",
+        "scenes": [
+            {"prompt": "The robot crosses the ash plain at dusk", "duration": 5},
+            {"prompt": "It kneels before the glowing flower", "duration": 5},
+        ],
+        "characters": ["Unit-7, a rusted scout robot"],
+    },
+    "Art Director": {
+        "visual_style": "cyberpunk anime",
+        "color_palette": ["#0FF0FC", "#FF00A0", "#101014"],
+        "character_sheet_prompt": "rusted scout robot, full body turnaround",
+        "scene_style_prompt": "dystopian ash plain, neon rim light",
+    },
+    "Character Designer": {
+        "characters": [
+            {"name": "Unit-7", "description": "a rusted scout robot",
+             "prompt": "rusted scout robot, chipped paint, single blue optic"},
+        ],
+    },
+    "Scene Designer": {
+        "scenes": [
+            {"description": "ash plain at dusk", "prompt": "wide ash plain, low sun",
+             "style": "cyberpunk anime"},
+            {"description": "crater with flower", "prompt": "crater, glowing blue flower",
+             "style": "cyberpunk anime"},
+        ],
+    },
+    "Storyboard Artist": {
+        "panels": [
+            {"scene": 1, "shot": "wide establishing", "composition": "robot small, frame left",
+             "camera": "slow pan right", "action": "Unit-7 crosses the ash plain"},
+            {"scene": 2, "shot": "close up", "composition": "flower centred, robot hands enter",
+             "camera": "slow push in", "action": "Unit-7 kneels before the flower"},
+        ],
+    },
+    "Animator": {
+        "animations": [
+            {"scene": 1, "motion": "Pan",
+             "prompt": "a slow camera pan across an ash plain at dusk as a rusted robot walks",
+             "duration": 5},
+            {"scene": 2, "motion": "Push in",
+             "prompt": "a slow push in on a glowing blue flower in a crater as dust drifts past",
+             "duration": 5},
+        ],
+    },
+    "Sound Director": {
+        "music_prompt": "synthwave ambient pulse, 120 BPM",
+        "sound_effects": [{"scene": 1, "sfx": "Wind"}, {"scene": 2, "sfx": "Servo whine"}],
+        "voice_over": "The journey begins.",
+    },
+    "Director": {
+        "final_notes": "Approved for final cut.",
+        "approved": True,
+        "revisions": [],
+    },
+}
+
+# Longest first: "Character Designer" and "Scene Designer" both contain "Designer", and every role
+# line would match a bare "Director" substring check.
+_ROLE_ORDER = [
+    "Scriptwriter", "Art Director", "Character Designer", "Scene Designer",
+    "Storyboard Artist", "Animator", "Sound Director", "Director",
+]
+
+
+def _mock_agent_payload(messages) -> dict:
+    system = ""
+    for m in messages or []:
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        if role == "system":
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+            system = content or ""
+            break
+    for role_name in _ROLE_ORDER:
+        if f"You are a {role_name}" in system or f"You are an {role_name}" in system \
+                or f"You are an expert {role_name}" in system:
+            return MOCK_AGENT_JSON[role_name]
+    return MOCK_AGENT_JSON["Director"]
+
+
+class MockChatAdapter(AIProviderAdapter):
+    def __init__(self, name: str = "mock_chat"):
+        self.provider_name = name
+        self.health_status = ProviderStatus.HEALTHY
+
+    def get_provider_name(self) -> str:
+        return self.provider_name
+
+    async def chat_completion(self, request=None, *args, **kwargs):
+        # Returns ChatCompletionResponse, not a bare dict. The orchestrator reads every agent
+        # response as `response.choices[0]["message"]["content"]` then json.loads it, so the old
+        # dict return raised `'dict' object has no attribute 'choices'` and its prose content
+        # would have failed _parse_json immediately after.
+        import json as _json
+        messages = getattr(request, "messages", None) if request is not None else None
+        payload = _mock_agent_payload(messages)
+        return ChatCompletionResponse(
+            id="mock-1",
+            model="mock-model",
+            choices=[{
+                "index": 0,
+                "message": {"role": "assistant", "content": _json.dumps(payload)},
+                "finish_reason": "stop",
+            }],
+            usage={"total_tokens": 42},
+        )
+
+    async def chat_completion_stream(self, *args, **kwargs):
+        async def gen():
+            yield ChatCompletionResponse(
+                id="mock-id",
+                model="mock",
+                choices=[{"index": 0, "message": {"role": "assistant", "content": "streamed"}, "finish_reason": "stop"}],
+                usage={},
+            )
+        return gen()
+
+    async def generate_image(self, *args, **kwargs):
+        return "https://image.pollinations.ai/prompt/cyberpunk%20city"
+
+    async def generate_video(self, *args, **kwargs):
+        # Returns the real contract -- VideoGenerationResponse, not a bare URL string. The old
+        # version returned a str, which matched the endpoint's old (broken) call and nothing else:
+        # every adapter in providers/ is declared as generate_video(request) -> VideoGenerationResponse.
+        return VideoGenerationResponse(
+            data=[{"url": "https://cdn.pollinations.ai/video/clip_scene_1.mp4",
+                   "credits_charged": 0}]
+        )
+
+    async def create_embedding(self, *args, **kwargs):
+        from providers.base import EmbeddingResponse
+        return EmbeddingResponse(object="list", data=[], model="mock-embed", usage={})
+
+    async def list_models(self):
+        return [Model(id="mock-model", object="model")]
+
+    async def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider="mock_chat", status=ProviderStatus.HEALTHY)
+
+
+@pytest.fixture(autouse=True)
+def setup_mock_registry():
+    reset_registry()
+    registry = get_registry()
+    # priority=-1, not 0, and that matters for money. init_registry() runs on every request and
+    # registers the real providers from settings.PROVIDER_PRIORITY, where omniroute_video sits at
+    # index 0 -- and omniroute_video spends real Flow/rtst credits per clip. At equal priority the
+    # winner would be decided by dict insertion order, so a test run could submit a genuine
+    # 20-credit job. A negative priority makes the mock unbeatable here by construction.
+    registry.register("mock_chat", MockChatAdapter(), priority=-1, capabilities=("chat", "image", "video", "audio"))
+    yield
+    reset_registry()
+
+
+def test_health_endpoint():
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert "providers" in data
+    assert "nim" not in data  # NVIDIA removed per AC-10
+
+
+def test_chat_completions_endpoint():
+    client = TestClient(app)
+    payload = {
+        "messages": [{"role": "user", "content": "Write a script for cyberpunk samurai"}],
+        "model": "gemini-2.5-flash",
+    }
+    response = client.post("/api/v1/chat/completions", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert "choices" in data
+
+
+def test_chat_stream_endpoint():
+    client = TestClient(app)
+    response = client.get("/api/v1/chat/stream?prompt=Hello")
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+
+
+def test_images_generations_endpoint():
+    client = TestClient(app)
+    payload = {
+        "prompt": "Cyberpunk cityscape neon rain",
+        "style": "Anime",
+    }
+    response = client.post("/api/v1/images/generations", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert "data" in data
+    assert len(data["data"]) > 0
+    assert "url" in data["data"][0]
+
+
+def test_videos_generations_endpoint():
+    client = TestClient(app)
+    payload = {
+        "prompt": "Camera panning across cyberpunk skyscrapers",
+    }
+    response = client.post("/api/v1/videos/generations", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert "video_url" in data
+
+
+def test_audio_speech_endpoint():
+    client = TestClient(app)
+    payload = {
+        "input": "In the neon-lit shadows of Neo-Tokyo...",
+    }
+    response = client.post("/api/v1/audio/speech", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert "audio_url" in data
+
+
+def test_projects_crud_endpoint():
+    client = TestClient(app)
+    # Create project
+    create_res = client.post("/api/v1/projects/", json={"title": "Cyber Samurai Animation"})
+    assert create_res.status_code == 200
+    proj = create_res.json()
+    proj_id = proj["id"]
+
+    # Get project
+    get_res = client.get(f"/api/v1/projects/{proj_id}")
+    assert get_res.status_code == 200
+    assert get_res.json()["title"] == "Cyber Samurai Animation"
+
+
+def test_pipeline_run_endpoint():
+    client = TestClient(app)
+    payload = {
+        "idea": "A robot finds a glowing blue flower on a dystopian planet",
+        "style": "Sci-Fi",
+    }
+    response = client.post("/api/v1/projects/test-proj-123/pipeline/run", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert len(data["stages"]) == 7
+
+
+def test_models_endpoint():
+    client = TestClient(app)
+    response = client.get("/api/v1/models/")
+    assert response.status_code == 200
+    data = response.json()
+    assert "categories" in data
+    assert len(data["video_models"]) >= 25
+    assert len(data["image_models"]) >= 25
+    assert len(data["llm_models"]) >= 25
+
+
+def test_styles_endpoint():
+    client = TestClient(app)
+    response = client.get("/api/v1/styles/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] >= 150
+
+
+def test_providers_health_endpoint():
+    client = TestClient(app)
+    response = client.get("/api/v1/providers/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert "providers" in data

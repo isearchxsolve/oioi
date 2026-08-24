@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "oioi-studio-ui",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "cd /d/god_ai/oioi/oioi && NEXT_PUBLIC_API_URL='http://127.0.0.1:8010/api/:path*' exec npx next dev -p 3011"
+      ],
+      "port": 3011
+    }
+  ]
+}

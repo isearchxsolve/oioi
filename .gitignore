@@ -1,0 +1,54 @@
+# ---- dependencies / build output ----
+node_modules/
+.next/
+dist/
+build/
+out/
+.turbo/
+.cache/
+*.tsbuildinfo
+next-env.d.ts
+
+# ---- python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# ---- SECRETS: never commit real env files (templates only) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+secrets/
+credentials.json
+service-account*.json
+
+# ---- local state / runtime junk ----
+*.log
+agent.pid
+storage/
+.aider*
+.neon_project_state.json
+.neon_working_memory.md
+.neon_worktrees/
+
+# ---- backups / archives (kept on disk, out of git) ----
+unzipped_backup/
+*.zip
+*.tar
+*.tar.gz
+
+# ---- stale nested duplicate of this same project ----
+# The index used to track a full copy of the app at oioi/ inside the repo root
+# (including its node_modules). It is superseded by the real tree at the root.
+/oioi/
+
+# ---- editor / OS ----
+.DS_Store
+Thumbs.db
+.idea/
+*.swp

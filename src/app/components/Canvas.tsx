@@ -1,0 +1,699 @@
+'use client';
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, NodeResizer } from '@xyflow/react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import axios from 'axios';
+import { Button, Card, CardHeader, CardContent, Input, Label, Toaster } from '@/components/ui';
+import { Plus, RefreshCw, Trash2, Save, Zap, LayoutDashboard, LayoutTemplate, X } from 'lucide-react';
+
+interface NodeData extends Record<string, unknown> {
+  label: string;
+  type: 'prompt' | 'image' | 'video' | 'script' | 'character' | 'scene' | 'generic';
+  status?: 'idle' | 'generating' | 'ready' | 'error';
+  progress?: number;
+  prompt?: string;
+  imageUrl?: string;
+  videoUrl?: string;
+  model?: string;
+  style?: string;
+  appearance?: string;
+  environment?: string;
+}
+
+interface NodeType {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  data: NodeData;
+}
+
+interface EdgeType {
+  id: string;
+  source: string;
+  target: string;
+  animated?: boolean;
+}
+
+const initialNodes: NodeType[] = [
+  {
+    id: 'prompt-1',
+    type: 'prompt',
+    position: { x: 100, y: 100 },
+    data: {
+      label: 'Story Prompt',
+      type: 'prompt',
+      status: 'idle',
+      prompt: 'Cyberpunk ninja confronting a giant neon dragon in Neo-Tokyo rain',
+      model: 'gemini-2.5-flash',
+      style: 'Anime'
+    }
+  }
+];
+
+const initialEdges: EdgeType[] = [];
+
+const Canvas = () => {
+  const [nodes, setNodes] = useState<NodeType[]>(initialNodes);
+  const [edges, setEdges] = useState<EdgeType[]>(initialEdges);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const queryClient = useQueryClient();
+  const reactFlowRef = useRef<any>(null);
+
+  // Fetch projects
+  const { data: projects, isLoading: isLoadingProjects } = useQuery({
+    queryKey: ['projects'],
+    queryFn: async () => {
+      const { data } = await axios.get('/api/v1/projects');
+      return data;
+    }
+  });
+
+  // Create new project
+  const createProjectMutation = useMutation({
+    mutationFn: async (projectData: { name: string; description?: string }) => {
+      const { data } = await axios.post('/api/v1/projects', projectData);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    }
+  });
+
+  // Save canvas state
+  const saveCanvasMutation = useMutation({
+    mutationFn: async (projectId: string) => {
+      const canvasState = {
+        nodes: nodes.map(node => ({
+          id: node.id,
+          type: node.type,
+          position: node.position,
+          data: node.data
+        })),
+        edges: edges.map(edge => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target
+        }))
+      };
+      
+      const { data } = await axios.put(`/api/v1/projects/${projectId}/canvas`, canvasState);
+      return data;
+    }
+  });
+
+  // Handle node creation
+  const handleNodeCreate = useCallback((type: string) => {
+    const newNodeId = `${type}-${Date.now()}`;
+    let initialData: NodeData;
+    
+    switch (type) {
+      case 'prompt':
+        initialData = {
+          label: 'New Prompt',
+          type: 'prompt',
+          status: 'idle',
+          prompt: '',
+          model: 'gemini-2.5-flash',
+          style: 'Anime'
+        };
+        break;
+      case 'image':
+        initialData = {
+          label: 'Generated Image',
+          type: 'image',
+          status: 'idle',
+          prompt: '',
+          imageUrl: '',
+          model: 'pollinations/flux'
+        };
+        break;
+      case 'video':
+        initialData = {
+          label: 'Generated Video',
+          type: 'video',
+          status: 'idle',
+          prompt: '',
+          videoUrl: '',
+          model: 'gemini-2.5-veo'
+        };
+        break;
+      case 'script':
+        initialData = {
+          label: 'Script',
+          type: 'script',
+          status: 'idle',
+          prompt: ''
+        };
+        break;
+      case 'character':
+        initialData = {
+          label: 'Character',
+          type: 'character',
+          status: 'idle',
+          prompt: '',
+          appearance: ''
+        };
+        break;
+      case 'scene':
+        initialData = {
+          label: 'Scene',
+          type: 'scene',
+          status: 'idle',
+          prompt: '',
+          environment: ''
+        };
+        break;
+      default:
+        initialData = {
+          label: 'New Node',
+          type: 'generic',
+          status: 'idle',
+          prompt: ''
+        };
+    }
+    
+    const newNode: NodeType = {
+      id: newNodeId,
+      type: type,
+      position: { x: 100, y: 100 },
+      data: initialData
+    };
+    
+    setNodes(prev => [...prev, newNode]);
+    setSelectedNodeId(newNodeId);
+  }, []);
+
+  // Handle node deletion
+  const handleNodeDelete = useCallback((nodeId: string) => {
+    setNodes(prev => prev.filter(node => node.id !== nodeId));
+    setEdges(prev => prev.filter(edge => edge.source !== nodeId && edge.target !== nodeId));
+    if (selectedNodeId === nodeId) {
+      setSelectedNodeId(null);
+    }
+  }, [selectedNodeId]);
+
+  // Handle connection
+  const onConnect = useCallback(({ source, target }: { source: string; target: string }) => {
+    setEdges(prev => [...prev, { id: `${source}-${target}`, source, target }]);
+  }, []);
+
+  // Handle node selection
+  const onNodeSelect = useCallback((event: { nodeId: string }) => {
+    setSelectedNodeId(event.nodeId);
+  }, []);
+
+  // Auto-layout nodes
+  const handleLayout = useCallback(() => {
+    const updatedNodes = nodes.map((node, index) => ({
+      ...node,
+      position: { x: 100 + (index * 250), y: 100 }
+    }));
+    setNodes(updatedNodes);
+  }, [nodes]);
+
+  // Clear completed nodes
+  const handleClearCompleted = useCallback(() => {
+    setNodes(prev => prev.filter(node => node.data.status !== 'ready'));
+  }, []);
+
+  // Process pipeline
+  const handleProcessPipeline = useCallback(async () => {
+    if (isProcessing) return;
+    
+    setIsProcessing(true);
+    
+    try {
+      const processedNodes = [...nodes];
+      
+      for (let i = 0; i < processedNodes.length; i++) {
+        const node = processedNodes[i];
+        
+        if (node.data.status === 'error' || node.data.status === 'ready') continue;
+        
+        setNodes(prev => 
+          prev.map(n => 
+            n.id === node.id 
+              ? { ...n, data: { ...n.data, status: 'generating', progress: 0 } } 
+              : n
+          )
+        );
+        
+        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
+        
+        setNodes(prev => 
+          prev.map(n => 
+            n.id === node.id 
+              ? { ...n, data: { ...n.data, status: 'ready', progress: 100 } } 
+              : n
+          )
+        );
+      }
+    } catch (error) {
+      console.error('Pipeline processing failed:', error);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [isProcessing, nodes]);
+
+  // Handle prompt input change
+  const handlePromptChange = useCallback((nodeId: string, prompt: string) => {
+    setNodes(prev =>
+      prev.map(node =>
+        node.id === nodeId
+          ? { ...node, data: { ...node.data, prompt } }
+          : node
+      )
+    );
+  }, []);
+
+  // Handle model change
+  const handleModelChange = useCallback((nodeId: string, model: string) => {
+    setNodes(prev =>
+      prev.map(node =>
+        node.id === nodeId
+          ? { ...node, data: { ...node.data, model } }
+          : node
+      )
+    );
+  }, []);
+
+  // Handle style change
+  const handleStyleChange = useCallback((nodeId: string, style: string) => {
+    setNodes(prev =>
+      prev.map(node =>
+        node.id === nodeId
+          ? { ...node, data: { ...node.data, style } }
+          : node
+      )
+    );
+  }, []);
+
+  // Generate content for a node
+  const handleGenerateContent = useCallback(async (nodeId: string) => {
+    setNodes(prev =>
+      prev.map(node =>
+        node.id === nodeId
+          ? { ...node, data: { ...node.data, status: 'generating', progress: 0 } }
+          : node
+      )
+    );
+    
+    try {
+      const node = nodes.find(n => n.id === nodeId);
+      if (!node) throw new Error('Node not found');
+      
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      setNodes(prev =>
+        prev.map(node =>
+          node.id === nodeId
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  status: 'ready',
+                  progress: 100,
+                  ...(node.data.type === 'image' && {
+                    imageUrl: `https://image.pollinations.ai/prompt/${encodeURIComponent(node.data.prompt || 'test')}?width=1024&height=576&nologo=true&seed=${Date.now()}`
+                  }),
+                  ...(node.data.type === 'video' && {
+                    videoUrl: `https://cdn.pollinations.ai/video/clip_${Date.now()}.mp4`
+                  }),
+                  ...(node.data.type === 'script' && {
+                    label: 'Generated Script'
+                  })
+                }
+              }
+            : node
+        )
+      );
+    } catch (error) {
+      console.error('Generation failed:', error);
+      setNodes(prev =>
+        prev.map(node =>
+          node.id === nodeId
+            ? { ...node, data: { ...node.data, status: 'error' } }
+            : node
+        )
+      );
+    }
+  }, [nodes]);
+
+  // Handle node changes from ReactFlow
+  const onNodesChange = useCallback((changes: any[]) => {
+    setNodes((prev) => {
+      let newNodes = [...prev];
+      for (const change of changes) {
+        if (change.type === "position") {
+          newNodes = newNodes.map((node) => 
+            node.id === change.id ? { ...node, position: change.position } : node
+          );
+        } else if (change.type === "data") {
+          newNodes = newNodes.map((node) => 
+            node.id === change.id ? { ...node, data: { ...node.data, ...change.data } } : node
+          );
+        } else if (change.type === "remove") {
+          newNodes = newNodes.filter((node) => node.id !== change.id);
+        } else if (change.type === "add") {
+          newNodes = [...newNodes, change.item];
+        }
+      }
+      return newNodes;
+    });
+  }, []);
+
+                </>
+              )}
+            </Button>
+          </div>
+        );
+        break;
+        
+      case 'script':
+        content = (
+          <div className="p-4 space-y-3">
+            <Label htmlFor={`script-${node.id}`}>Script Content</Label>
+            <textarea
+              id={`script-${node.id}`}
+              value={node.data.prompt || ''}
+              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => handlePromptChange(node.id, e.target.value)}
+              className="w-full h-48 p-2 border rounded"
+              placeholder="Generated script will appear here..."
+            />
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={handleGenerate}
+              disabled={node.data.status === 'generating'}
+            >
+              {node.data.status === 'generating' ? (
+                <div className="flex items-center space-x-1">
+                  <div className="w-3 h-3 border border-current border-t-transparent border-r-transparent rounded-full animate-spin" />
+                  <span>Generating...</span>
+                </div>
+              ) : (
+                <>
+                  <Zap className="mr-2 h-4 w-4" />
+                  <span>Generate Script</span>
+                </>
+              )}
+            </Button>
+          </div>
+        );
+        break;
+        
+      default:
+        content = (
+          <div className="p-4">
+            <p>Node type: {node.data.type}</p>
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={handleGenerate}
+              disabled={node.data.status === 'generating'}
+            >
+              {node.data.status === 'generating' ? 'Generating...' : 'Generate'}
+            </Button>
+          </div>
+        );
+    }
+
+    // Status indicator
+    const statusBadge = () => {
+      switch (node.data.status) {
+        case 'idle': return <span className="px-2 py-1 bg-gray-200 text-gray-800 text-xs rounded">Idle</span>;
+        case 'generating': return <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded">Generating</span>;
+        case 'ready': return <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded">Ready</span>;
+        case 'error': return <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">Error</span>;
+        default: return <span className="px-2 py-1 bg-gray-200 text-gray-800 text-xs rounded">Unknown</span>;
+      }
+    };
+
+    return (
+      <div 
+        className="border border-gray-200 rounded-lg shadow-sm bg-white p-4 min-w-[200px] cursor-move"
+        onDoubleClick={handleDoubleClick}
+        data-selected={selectedNodeId === node.id ? 'true' : 'false'}
+        style={{
+          borderColor: selectedNodeId === node.id ? '#3b82f6' : 'transparent',
+          boxShadow: selectedNodeId === node.id ? '0 0 0 2px #3b82f6' : 'none'
+        }}
+      >
+        <div className="flex justify-between items-start mb-3">
+          <h4 className="font-semibold">{node.data.label}</h4>
+          <div className="flex space-x-2">
+            {statusBadge()}
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              onClick={() => handleNodeDelete(node.id)}
+              aria-label="Delete node"
+            >
+              <Trash2 className="h-4 w-4 text-red-500" />
+            </Button>
+          </div>
+        </div>
+        {content}
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex h-screen">
+      {/* Sidebar */}
+      <div className="w-64 bg-gray-900 text-gray-100 p-4 space-y-4">
+        <div className="space-y-6">
+          <div>
+            <h3 className="text-lg font-semibold mb-2">Canvas Controls</h3>
+            <div className="space-y-3">
+              <Button 
+                variant="outline" 
+                onClick={handleLayout}
+                className="w-full text-left"
+              >
+                <LayoutDashboard className="mr-2 h-4 w-4" /> Auto-layout
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={handleClearCompleted}
+                className="w-full text-left"
+              >
+                <Trash2 className="mr-2 h-4 w-4" /> Clear Completed
+              </Button>
+              <Button 
+                variant="default" 
+                onClick={handleProcessPipeline}
+                disabled={isProcessing}
+                className="w-full"
+              >
+                {isProcessing ? (
+                  <div className="flex items-center space-x-1">
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Processing...</span>
+                  </div>
+                ) : (
+                  <>
+                    <Zap className="mr-2 h-4 w-4" />
+                    <span>Run Pipeline</span>
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+          
+          <div>
+            <h3 className="text-lg font-semibold mb-2">Add Node</h3>
+            <div className="space-y-2">
+              <Button 
+                variant="outline" 
+                onClick={() => handleNodeCreate('prompt')}
+                className="w-full text-left"
+              >
+                <Zap className="mr-2 h-4 w-4" /> Prompt
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={() => handleNodeCreate('image')}
+                className="w-full text-left"
+              >
+                <LayoutTemplate className="mr-2 h-4 w-4" /> Image
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={() => handleNodeCreate('video')}
+                className="w-full text-left"
+              >
+                <LayoutTemplate className="mr-2 h-4 w-4" /> Video
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={() => handleNodeCreate('script')}
+                className="w-full text-left"
+              >
+                <LayoutTemplate className="mr-2 h-4 w-4" /> Script
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={() => handleNodeCreate('character')}
+                className="w-full text-left"
+              >
+                <LayoutTemplate className="mr-2 h-4 w-4" /> Character
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={() => handleNodeCreate('scene')}
+                className="w-full text-left"
+              >
+                <LayoutTemplate className="mr-2 h-4 w-4" /> Scene
+              </Button>
+            </div>
+          </div>
+          
+          {selectedNodeId && (
+            <div>
+              <h3 className="text-lg font-semibold mb-2">Node Properties</h3>
+              <div className="space-y-3">
+                <div className="p-4 bg-gray-800 rounded-lg">
+                  <p className="text-gray-400 text-sm">
+                    Select a node to edit its properties here.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        
+        <div className="mt-6 pt-4 border-t">
+          <h3 className="text-lg font-semibold mb-2">Project</h3>
+          {isLoadingProjects ? (
+            <p className="text-xs text-gray-400">Loading projects...</p>
+          ) : (
+            <>
+              <select 
+                value={projects?.[0]?.id || ''}
+                onChange={(e) => console.log('Project selected:', e.target.value)}
+                className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 pr-8 text-sm shadow-sm"
+              >
+                <option value="">Select project...</option>
+                {projects?.map((project: any) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                )) || []}
+              </select>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={() => createProjectMutation.mutate({ name: 'New Project', description: 'Created from canvas' })}
+                className="w-full mt-2"
+              >
+                <Plus className="mr-2 h-3 w-3" /> New Project
+              </Button>
+            </>
+          )}
+          
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={() => {
+              if (projects?.[0]?.id) {
+                saveCanvasMutation.mutate(projects[0].id);
+              }
+            }}
+            disabled={!projects?.[0]?.id}
+            className="w-full mt-4"
+          >
+            <Save className="mr-2 h-3 w-3" /> Save Canvas
+          </Button>
+        </div>
+      </div>
+      
+      {/* Main Canvas */}
+      <div className="flex-1 bg-gray-50 relative">
+        <Toaster />
+        <ReactFlowProvider>
+          <ReactFlow
+            ref={reactFlowRef}
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={(changes) => setNodes((prev) => {
+              let newNodes = [...prev];
+              for (const change of changes) {
+                if (change.type === "position") {
+                  newNodes = newNodes.map((node) => 
+                    node.id === change.id ? { ...node, position: change.position } : node
+                  );
+                } else if (change.type === "data") {
+                  newNodes = newNodes.map((node) => 
+                    node.id === change.id ? { ...node, data: { ...node.data, ...change.data } } : node
+                  );
+                } else if (change.type === "remove") {
+                  newNodes = newNodes.filter((node) => node.id !== change.id);
+                } else if (change.type === "add") {
+                  newNodes = [...newNodes, change.item];
+                }
+              }
+              return newNodes;
+            })}
+            onEdgesChange={(changes) => setEdges((prev) => {
+              let newEdges = [...prev];
+              for (const change of changes) {
+                if (change.type === "add") {
+                  newEdges = [...newEdges, change.item];
+                } else if (change.type === "remove") {
+                  newEdges = newEdges.filter((edge) => edge.id !== change.id);
+                }
+              }
+              return newEdges;
+            })}
+            onConnect={onConnect}
+            onNodeClick={onNodeSelect}
+            nodeTypes={{ default: NodeComponent }}
+            enablePaneSelection={true}
+            panOnScroll={true}
+            zoomOnPinch={true}
+            minZoom={0.5}
+            maxZoom={2}
+            fitView
+            className="h-full"
+          >
+            <Background />
+            <Controls position="top-left" style={{ gap: '8px' }} />
+            <MiniMap 
+              nodeColor={(nodeId) => 
+                nodes.find(n => n.id === nodeId)?.data.status === 'generating' 
+                  ? '#3b82f6' 
+                  : nodes.find(n => n.id === nodeId)?.data.status === 'ready' 
+                    ? '#10b981' 
+                    : '#6b7280'
+              }
+              bgColor="rgba(0,0,0,0.2)"
+              strokeColor="rgba(255,255,255,0.5)"
+              position="bottom-left"
+            />
+          </ReactFlow>
+        </ReactFlowProvider>
+      </div>
+      
+      {/* Right Sidebar for detailed editing */}
+      <div className="w-64 bg-gray-900 text-gray-100 p-4">
+        {selectedNodeId && (
+          <div>
+            <h3 className="text-lg font-semibold mb-4">Node Editor</h3>
+            <div className="space-y-4">
+              <div className="p-4 bg-gray-800 rounded-lg">
+                <p className="text-gray-400 text-sm">
+                  Select a node from the canvas to edit its properties here.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default Canvas;

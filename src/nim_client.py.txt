@@ -1,0 +1,1 @@
+# NVIDIA NIM API Client for OiiOii.ai Clone  (c) 2025 Neon Architect Team  This module provides a thin wrapper around the NVIDIA NIM Cloud API  for LLM, image, and video generation.  It follows the OpenAI-compatible API spec at https://integrate.api.nvidia.com/v1  ---------------------------------------------------------------------------  

@@ -1,0 +1,1 @@
+# Agent Contracts for OiiOii.ai Clone 7-Agent Animation Pipeline  from typing import List, Optional, Dict, Any  from pydantic import BaseModel, Field  # Base classes for agent inputs and outputs  class AgentInput(BaseModel):     pass  class AgentOutput(BaseModel):     pass  # Scriptwriter Agent  class ScriptwriterInput(AgentInput):     prompt: str = Field(..., description=

@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0b;
+  --foreground: #ededed;
+  --bg-surface: #131316;
+  --bg-elevated: #1c1c21;
+  --bg-canvas: #0f0f12;
+  --accent: #8b5cf6;
+  --border-subtle: #27272a;
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Infinite canvas backdrop — subtle dot grid */
+.canvas-grid {
+  background-color: var(--bg-canvas);
+  background-image: radial-gradient(circle, #27272a 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Shimmer placeholder for pending generation nodes */
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    #131316 0%,
+    #1c1c21 50%,
+    #131316 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* Focus ring — accessible, visible on dark */
+*:focus-visible {
+  outline: 2px solid #a78bfa;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Scrollbars — slim, dark */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #52525b; background-clip: content-box; }
+
+/* Reduced motion — disable non-essential animation */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .shimmer { animation: none; background: #1c1c21; }
+}

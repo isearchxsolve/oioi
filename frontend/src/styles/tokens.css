@@ -1,0 +1,65 @@
+/* OiiOii.ai Clone — Design Tokens (CSS variables) */
+:root {
+  /* Background */
+  --bg-base: #0A0A0F;
+  --bg-surface: #121218;
+  --bg-surface-2: #1A1A24;
+  --bg-elevated: #22222E;
+
+  /* Borders */
+  --border-subtle: #2A2A38;
+  --border-strong: #3A3A4D;
+
+  /* Text */
+  --text-primary: #F5F5FA;
+  --text-secondary: #A0A0B8;
+  --text-muted: #6B6B80;
+
+  /* Accent */
+  --accent-primary: #8B5CF6;
+  --accent-primary-hover: #A78BFA;
+  --accent-primary-soft: rgba(139, 92, 246, 0.12);
+  --accent-secondary: #6366F1;
+
+  /* Status */
+  --success: #22C55E;
+  --warning: #F59E0B;
+  --danger: #EF4444;
+
+  /* Gradient */
+  --gradient-hero: linear-gradient(135deg, #8B5CF6, #6366F1);
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 9999px;
+
+  /* Shadow */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-modal: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Z-index */
+  --z-base: 0;
+  --z-sidebar: 10;
+  --z-canvas: 20;
+  --z-panels: 30;
+  --z-dropdown: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+
+  /* Motion */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}
