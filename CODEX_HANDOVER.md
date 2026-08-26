@@ -88,24 +88,39 @@ claimed "~600 clips available". That was a *projection* from `providers × seats
 it read as current state. Measured just now:
 
 ```
-session_pool.py list      -> 24 seats dispatchable, ALL 24 modality=chat, ZERO video
-/v1/video/capacity        -> totalClipsAvailable: 0   (PoolEngine.live(modality="video") is empty)
-rtst.ai                   -> 24 credits = 4 clips (vidu 3s@540p), PROVEN e2e (872KB mp4, id 96089)
+session_pool.py list      -> 25 seats dispatchable; 1 is modality=video and LIVE (was ZERO)
+/v1/video/capacity        -> {"seats":[{"seat":"session_rtst_ai","provider":"rtst.ai",
+                              "creditsRemaining":11.0,"clipsRemaining":1}],"totalClipsAvailable":1}
+rtst.ai                   -> PROVEN THROUGH :8189 ITSELF (see below), 11 credits = 1 more clip
 heygen.com                -> 3 free renders unused, authenticated, NO ADAPTER BUILT
 digen / kling / openart   -> needs work / balance request-signed / no capacity
 ```
 
-**Real motion clips available tonight: ~4, realistically ~7 if I wire heygen. Against 360 needed. ~2%.**
+**The contract is no longer a spec — it is proven against real money.** One clip went the whole way
+through the frozen face tonight, 2026-08-26:
 
-I am not going to close that gap tonight and neither is anyone else: 360 clips at ~4 free clips per
-account needs ~90 successful provider signups, each a browser flow. Breadth is the right long-run
-lever and it is not a tonight lever.
+```
+POST /v1/video/jobs      -> 202 {jobId: daf1a7676753466c82acd3d22113a62d, provider: rtst.ai}
+POST again, SAME jobKey  -> 200, SAME jobId          (no second submit)
+GET  /v1/video/jobs/{id} -> running x4 -> succeeded  (~50s)
+GET  .../content         -> 200, 705,465 bytes, ftypisom = a real MP4
+rtst balance 17 -> 11    -> exactly 6 charged for TWO posts: idempotency holds under real money
+```
+
+So `jobKey` idempotency, the async poll, the `url`-on-my-own-origin rule that keeps
+`HttpClipMaterializer` unchanged, and single-charge semantics are all measured, not asserted. Build
+against them with confidence.
+
+**Real motion clips available tonight: 1 more from rtst, realistically ~4 if I wire heygen. Against
+360 needed. ~1%.** The gap is unchanged and unclosable tonight — 360 clips at ~4 free clips per
+account needs ~90 browser signups.
 
 **So read §4.1 again with this in mind: Ken Burns is not a degradation path, it IS the film.** The
 `:8189` pool contributes a handful of hero shots. Concretely, for your orchestrator:
 
-1. **Assume `503 no_capacity` is the DEFAULT answer, not the exception.** Today it is the *only*
-   answer. The film must be complete and watchable with zero clips from me.
+1. **Assume `503 no_capacity` is the DEFAULT answer, not the exception.** It really does render a clip
+   today — but only one, so shot 2 onward gets the 503. The film must be complete and watchable with
+   zero clips from me.
 2. **Spend the real clips deliberately.** When capacity is 4, those 4 go to the shots that need true
    motion — the opening, a climax, whatever the Director marks — not to shots 1-4 in submission order.
    A `heroShot` flag on `ShotSpec`, or simply "spend capacity on the first N shots the Director ranks",
@@ -247,7 +262,11 @@ consistency mechanism available; there is no provider affinity to lean on.
 
 ## 6. What I owe you
 
-- `/v1/video/capacity` reporting **real** per-seat credits and `clipsRemaining` (in progress).
+- ~~`/v1/video/capacity` reporting **real** per-seat credits and `clipsRemaining`~~ — **DONE tonight.**
+  A seat that can read its own balance for free (rtst) now reports true credits and clips; a replay
+  seat, which cannot learn its balance without spending, keeps an honest floor of 1. A seat that
+  throws while being asked degrades to that floor rather than 500-ing the endpoint — so `capacity()`
+  is safe to call on every tick, which is the premise of your fix #7.
 - More providers wired into the pool — raises `totalClipsAvailable` with no change on your side.
 - Any contract change you need, in the contract, not in a workaround.
 
