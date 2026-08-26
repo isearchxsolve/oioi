@@ -107,7 +107,7 @@ def _extract_json(text: str) -> Any:
 class ShotListPlanner:
     """Uses the chat pool in batched calls while retaining a compact continuity bible."""
 
-    def __init__(self, chat: ChatPoolClient, *, batch_size: int = 40) -> None:
+    def __init__(self, chat: ChatPoolClient, *, batch_size: int = 6) -> None:
         self.chat = chat
         self.batch_size = max(1, int(batch_size))
 
@@ -168,7 +168,10 @@ class ShotListPlanner:
                 count=count, bible=compact_bible, script=script, assignments=assignments,
                 first=start + 1, last=start + count,
             )
-            reply = await self.chat.message(request, max_tokens=max(1024, count * 120), model="pool/auto")
+            # One complete six-shot scene is the smallest scene-coherent planner
+            # transaction. It avoids both the 39/40 response truncation and the
+            # >45-second timeout observed for larger structured replies.
+            reply = await self.chat.message(request, max_tokens=max(1024, count * 150), model="pool/auto")
             provider = reply.provider
             raw = _extract_json(reply.text)
             if isinstance(raw, dict):
