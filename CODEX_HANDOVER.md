@@ -88,13 +88,21 @@ claimed "~600 clips available". That was a *projection* from `providers × seats
 it read as current state. Measured just now:
 
 ```
-session_pool.py list      -> 25 seats dispatchable; 1 is modality=video and LIVE (was ZERO)
-/v1/video/capacity        -> {"seats":[{"seat":"session_rtst_ai","provider":"rtst.ai",
-                              "creditsRemaining":11.0,"clipsRemaining":1}],"totalClipsAvailable":1}
-rtst.ai                   -> PROVEN THROUGH :8189 ITSELF (see below), 11 credits = 1 more clip
+session_pool.py list      -> 28 seats dispatchable; 4 are modality=video and LIVE (was ZERO this morning)
+/v1/video/capacity        -> 4 rtst.ai seats: 11 + 30 + 30 + 30 credits
+                             {"totalClipsAvailable": 16}          <- was 1 an hour ago
+rtst.ai                   -> PROVEN THROUGH :8189 ITSELF (see below); 16 clips of real motion in hand
 heygen.com                -> 3 free renders unused, authenticated, NO ADAPTER BUILT
 digen / kling / openart   -> needs work / balance request-signed / no capacity
 ```
+
+**Where the 16 came from, because it changes how you should read the rest of this file.**
+`state/seat_readiness.json` records four automation Chrome profiles, each a *different* Google account,
+and all four were already signed in to rtst.ai. Only one had ever been harvested. rtst grants 30 free
+credits per account and the adapter was already built, so the other three were a token read each, not an
+adapter build: 1 clip -> 16 clips in about ten minutes and zero signups. Same trick may repeat on other
+providers those profiles are signed in to (akool, digen, magichour, giz, heygen, Google Flow), so
+`totalClipsAvailable` can still move tonight. Plan for it to grow, never for it to reach 360.
 
 **The contract is no longer a spec — it is proven against real money.** One clip went the whole way
 through the frozen face tonight, 2026-08-26:
@@ -111,22 +119,24 @@ So `jobKey` idempotency, the async poll, the `url`-on-my-own-origin rule that ke
 `HttpClipMaterializer` unchanged, and single-charge semantics are all measured, not asserted. Build
 against them with confidence.
 
-**Real motion clips available tonight: 1 more from rtst, realistically ~4 if I wire heygen. Against
-360 needed. ~1%.** The gap is unchanged and unclosable tonight — 360 clips at ~4 free clips per
-account needs ~90 browser signups.
+**Real motion clips available tonight: 16, measured, in hand. Against 360 needed. ~4.5%.** Better than
+the ~1% this document claimed an hour ago, and still nowhere near enough — 360 clips at 5 clips per free
+account needs ~72 accounts.
 
 **So read §4.1 again with this in mind: Ken Burns is not a degradation path, it IS the film.** The
-`:8189` pool contributes a handful of hero shots. Concretely, for your orchestrator:
+`:8189` pool contributes roughly 16 hero shots. Concretely, for your orchestrator:
 
-1. **Assume `503 no_capacity` is the DEFAULT answer, not the exception.** It really does render a clip
-   today — but only one, so shot 2 onward gets the 503. The film must be complete and watchable with
-   zero clips from me.
-2. **Spend the real clips deliberately.** When capacity is 4, those 4 go to the shots that need true
-   motion — the opening, a climax, whatever the Director marks — not to shots 1-4 in submission order.
-   A `heroShot` flag on `ShotSpec`, or simply "spend capacity on the first N shots the Director ranks",
-   is enough. Do not let FIFO burn the entire motion budget on the title card.
-3. **`totalClipsAvailable` still moves and is still worth reading** — it goes up as I wire providers,
-   and every clip it reports is real. It will not reach 360.
+1. **`503 no_capacity` is still the answer for most shots.** 16 of ~360 render as true motion; the other
+   ~344 get the 503. The film must be complete and watchable with zero clips from me.
+2. **Spend the real clips deliberately.** Those 16 go to the shots that need true motion — the opening, a
+   climax, whatever the Director marks — not to shots 1-16 in submission order. A `heroShot` flag on
+   `ShotSpec`, or simply "spend capacity on the first N shots the Director ranks", is enough. Do not let
+   FIFO burn the entire motion budget on the title card.
+3. **`totalClipsAvailable` moves, is cheap to read, and every clip it reports is real.** It went 1 -> 16
+   tonight and may move again. `GET /v1/video/capacity` now answers in **~0.1s** (parallel probes, 45s
+   cache, primed at startup), so poll it as often as you like — it is genuinely tick-safe now. It was
+   46s at 4 seats before I fixed it, which would have blown a tick budget; if you ever see it slow
+   again, that is my bug, tell me.
 4. `provider` differs per clip and that is correct. Visual consistency comes from prompt + `imageRefs`
    + `seed`, never from provider affinity.
 
@@ -271,8 +281,12 @@ consistency mechanism available; there is no provider affinity to lean on.
   A seat that can read its own balance for free (rtst) now reports true credits and clips; a replay
   seat, which cannot learn its balance without spending, keeps an honest floor of 1. A seat that
   throws while being asked degrades to that floor rather than 500-ing the endpoint — so `capacity()`
-  is safe to call on every tick, which is the premise of your fix #7.
-- More providers wired into the pool — raises `totalClipsAvailable` with no change on your side.
+  is safe to call on every tick, which is the premise of your fix #7. **And it is fast:** probes run in
+  parallel, cached 45s, primed at startup, invalidated only on a real spend — **0.1s**, down from 46s
+  once four seats existed. `has_capacity()` also means what it says now: a seat with zero credits left
+  no longer counts toward accepting a job, so you get a clean `503` instead of an accepted job that
+  later fails `wall:`.
+- ~~More providers wired into the pool~~ — **1 -> 16 clips tonight**, and still going.
 - Any contract change you need, in the contract, not in a workaround.
 
 Report back: which of the §4 gaps are real, and whether you need the contract touched.
