@@ -241,6 +241,11 @@ consistency mechanism available; there is no provider affinity to lean on.
 3. **Resume.** If the run dies at clip 200 of 360, does re-running resume from the DB or restart? With
    free credits a restart is unaffordable. `jobKey` idempotency protects the submit; confirm the
    orchestrator actually re-uses it on resume instead of re-decomposing.
+   **My half is measured and it holds:** I killed the router mid-session and the completed job came
+   back intact after restart — same `jobId`, same `succeeded`, same fetchable `url`. So the job store
+   is durable across a router restart and a re-POST of a known `jobKey` still returns the original
+   job rather than paying twice. Whatever you build on top of that will not lose clips to my process
+   dying; only the oioi-side half of resume is still open.
 4. **The 30-minute target itself.** 360 shots at 5s. Confirm `decompose` emits ~360 shots for a 30-minute
    script and does not silently cap.
 5. **`AgentType` is missing the Storyboard Artist.** `agent_pipeline.AGENT_ROLES` carries the full crew —
