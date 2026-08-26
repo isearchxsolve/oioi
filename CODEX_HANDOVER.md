@@ -111,6 +111,13 @@ Consequences for your orchestrator:
 
 **P0 — money / correctness**
 
+0. **The hybrid degradation path — do this one FIRST.** Full detail in §4.1. On `503 no_capacity` or a
+   shot ending `wall:`, that shot falls back to a keyless Ken Burns clip in the **same ordered slot**
+   instead of stalling the film. It is listed ahead of the dedup fix because it is the only item that
+   makes the deadline independent of my seat count: with it, a 30-minute film finishes tonight and
+   `totalClipsAvailable` merely decides how much of it is true motion. Without it, e2e needs ~360 real
+   clips, which 3 Google-SSO seats cannot deliver tonight at any effort. **This is the critical path.**
+
 1. **No terminal `failed` state for a film** → a dead clip makes the film un-finalizable, yet `tick`
    re-stamps it `running` forever: infinite re-tick, wasted polls.
 2. **Dedup is inert in the default config → you pay for duplicate clips.** `decompose` gives every shot a
@@ -165,7 +172,8 @@ real frames, keyless, free. Your own docstring says the Director's FFmpeg concat
 feature today". So **a 30-minute film is deliverable with zero video credits**, and my `:8189` pool is a
 **quality lever, not a gate**. Every framing I gave you that treated credits as the blocker was wrong.
 
-**What I want from you because of this:** a **hybrid degradation path** in the orchestrator. When
+**What I want from you because of this — now promoted to P0 #0 in §3, ahead of the dedup fix:** a
+**hybrid degradation path** in the orchestrator. When
 `/v1/video/jobs` answers `503 no_capacity`, or a shot ends `wall:`, that shot falls back to a Ken Burns
 clip instead of stalling the film — same `ShotSpec`, same slot in the ordered assembly, lower fidelity.
 Then the film **always** finishes and `totalClipsAvailable` only decides how much of it is true motion:
