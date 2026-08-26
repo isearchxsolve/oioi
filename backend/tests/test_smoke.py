@@ -97,7 +97,7 @@ def test_smoke_style_get_known():
 # --- Agent contracts --------------------------------------------------------
 
 def test_smoke_agent_roles():
-    assert len(list(ac.AgentType)) == 7
+    assert len(list(ac.AgentType)) == 8
 
 
 @pytest.mark.parametrize("agent", list(ac.AgentType))

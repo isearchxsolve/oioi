@@ -89,5 +89,6 @@ class ShotSpec:
     image_refs: List[str] = field(default_factory=list)
     seed: Optional[int] = None
     continuity: Dict[str, Any] = field(default_factory=dict)
+    #: Director-selected hero shots consume scarce true-motion capacity before ordinary coverage.
+    hero_shot: bool = False
     canonical_index: Optional[int] = None
-

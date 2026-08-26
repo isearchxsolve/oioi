@@ -1,4 +1,4 @@
-"""QA suite for agent_contracts — pydantic validation on the 7-agent pipeline.
+"""QA suite for agent_contracts — pydantic validation on the seven-stage crew.
 
 Asserts real validation behavior: required fields reject empty payloads, valid
 payloads construct, enums round-trip, and the orchestrator interface is
@@ -62,8 +62,8 @@ def _sound_out():
 
 # --- AgentType enum ---------------------------------------------------------
 
-def test_agent_type_has_seven_roles():
-    assert len(list(ac.AgentType)) == 7
+def test_agent_type_has_all_seven_worker_roles_plus_director():
+    assert len(list(ac.AgentType)) == 8
 
 
 @pytest.mark.parametrize("agent", list(ac.AgentType))
@@ -77,7 +77,7 @@ def test_agent_type_roundtrips(agent):
 
 
 @pytest.mark.parametrize("expected", [
-    "scriptwriter", "art_director", "character_designer", "scene_designer",
+    "scriptwriter", "art_director", "character_designer", "scene_designer", "storyboard_artist",
     "animator", "sound_director", "director",
 ])
 def test_agent_type_expected_values_present(expected):
@@ -231,7 +231,7 @@ def test_orchestrator_is_abstract():
 
 @pytest.mark.parametrize("method", [
     "run_scriptwriter", "run_art_director", "run_character_designer",
-    "run_scene_designer", "run_animator", "run_sound_director",
+    "run_scene_designer", "run_storyboard_artist", "run_animator", "run_sound_director",
     "run_director", "run_pipeline",
 ])
 def test_orchestrator_defines_method(method):

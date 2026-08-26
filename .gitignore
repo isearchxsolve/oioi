@@ -31,6 +31,11 @@ service-account*.json
 *.log
 agent.pid
 storage/
+# Rendered films and local SQLite state are retained for operators but must never
+# enter repository history.
+/backend/run_artifacts/
+/backend/test.db
+/test.db
 .aider*
 .neon_project_state.json
 .neon_working_memory.md

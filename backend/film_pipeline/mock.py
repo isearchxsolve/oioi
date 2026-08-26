@@ -35,6 +35,11 @@ class MockVideoConfig:
     terminal_failures: Dict[str, str] = field(default_factory=dict)
     #: key -> number of transient HTTP 500 responses before a job is registered.
     submit_transient_failures: Dict[str, int] = field(default_factory=dict)
+    #: key -> HTTP status responses injected before a normal status poll.  This
+    #: exercises the consumer's non-2xx poll resilience without a real router.
+    poll_http_failures: Dict[str, List[int]] = field(default_factory=dict)
+    #: One non-2xx capacity response is enough to verify it cannot crash a tick.
+    capacity_http_failures: List[int] = field(default_factory=list)
 
 
 class _CreateJob(BaseModel):
@@ -130,6 +135,9 @@ class MockVideoBackend:
             job = self.jobs_by_id.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail="job not found")
+            failures = self.config.poll_http_failures.get(job["jobKey"], [])
+            if failures:
+                raise HTTPException(status_code=failures.pop(0), detail="injected poll transport failure")
             self._advance(job)
             return {
                 key: job[key] for key in ("jobId", "status", "provider", "progress", "url", "error", "creditsSpent")
@@ -137,6 +145,8 @@ class MockVideoBackend:
 
         @self.app.get("/v1/video/capacity")
         async def capacity():
+            if self.config.capacity_http_failures:
+                raise HTTPException(status_code=self.config.capacity_http_failures.pop(0), detail="injected capacity failure")
             seats = [
                 {"seat": s.seat, "provider": s.provider, "creditsRemaining": s.credits_remaining,
                  "clipsRemaining": s.clips_remaining, "cooldownUntil": s.cooldown_until}
@@ -182,12 +192,21 @@ class DeterministicMockChatClient:
         if not match:
             raise ValueError("mock chat could not find requested shot batch")
         first, last = int(match.group(1)), int(match.group(2))
-        # Repeat every fourth beat so the mock exercises canonical render reuse deterministically.
+        # Repeat moving prompts every fourth beat so the mock continues to exercise
+        # canonical render reuse.  The production planner contract is nevertheless
+        # represented exactly: six cuts share one scene still and each cut has a
+        # different editorial camera move.
+        camera_moves = (
+            "slow push in", "pan left", "pan right", "gentle zoom out", "tilt up", "slow drift",
+        )
         shots = [
             {
                 "prompt": f"mock cinematic story beat {(index - 1) % 4 + 1}, stable protagonist and lighting",
+                "stillPrompt": f"mock scene {(index - 1) // 6 + 1}, stable protagonist and location",
+                "cameraMove": camera_moves[(index - 1) % 6],
                 "imageRefs": [],
                 "continuity": {"wardrobe": "unchanged", "lighting": "cinematic continuity"},
+                "heroShot": (index - 1) % 6 == 0,
             }
             for index in range(first, last + 1)
         ]

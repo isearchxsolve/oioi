@@ -18,6 +18,8 @@ re-encoding three hours of video.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 import os
 import shutil
@@ -49,6 +51,15 @@ class MediaError(RuntimeError):
     """An ffmpeg invocation or media download failed."""
 
 
+class MediaContentTypeError(MediaError):
+    """A successful-looking response was not the requested media type.
+
+    This is intentionally separate from a transport failure.  A Pollinations rate
+    limit can arrive as a small JSON body; retrying that same documented response three
+    times only burns wall-clock time and conceals why a fallback became a slate.
+    """
+
+
 @dataclass
 class ProcResult:
     returncode: int
@@ -77,6 +88,12 @@ def ffmpeg_available() -> bool:
 
 def resolve_size(aspect_ratio: str) -> Tuple[int, int]:
     return TARGET_SIZE.get(aspect_ratio, TARGET_SIZE["16:9"])
+
+
+def stable_media_key(value: object) -> str:
+    """Return a deterministic content identity suitable for local media caches."""
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 async def run_proc(args: Sequence[str], *, timeout: float = 900.0) -> ProcResult:
@@ -377,6 +394,7 @@ async def download(
     timeout: float = 240.0,
     attempts: int = 3,
     min_bytes: int = 1024,
+    expected_content_type_prefix: Optional[str] = None,
 ) -> Path:
     """Stream ``url`` to ``dest`` atomically, with retries.
 
@@ -395,6 +413,14 @@ async def download(
                 written = 0
                 with open(tmp, "wb") as fh:
                     async with http.stream("GET", url, timeout=timeout, follow_redirects=True) as resp:
+                        content_type = (resp.headers.get("content-type") or "").lower()
+                        if expected_content_type_prefix and (
+                            resp.status_code == 429 or not content_type.startswith(expected_content_type_prefix.lower())
+                        ):
+                            raise MediaContentTypeError(
+                                f"expected {expected_content_type_prefix} response, got HTTP {resp.status_code} "
+                                f"content-type {content_type or 'missing'}"
+                            )
                         if resp.status_code >= 400:
                             last_error = f"HTTP {resp.status_code}"
                             raise MediaError(last_error)
@@ -406,6 +432,10 @@ async def download(
                     raise MediaError(last_error)
                 os.replace(tmp, dest)
                 return dest
+            except MediaContentTypeError:
+                # A JSON/error payload is a definitive response for an image fetch;
+                # do not turn one rate-limit signal into three repeated requests.
+                raise
             except (httpx.HTTPError, MediaError, OSError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if attempt < attempts - 1:
@@ -933,6 +963,7 @@ __all__ = [
     "AUDIO_CHANNELS",
     "AUDIO_RATE",
     "CONCAT_BATCH",
+    "MediaContentTypeError",
     "MediaError",
     "ProcResult",
     "TARGET_FPS",
@@ -952,6 +983,7 @@ __all__ = [
     "probe_duration",
     "resolve_size",
     "run_proc",
+    "stable_media_key",
     "streamelements_tts_url",
     "synthesize_kenburns_clip",
     "synthesize_music_bed",

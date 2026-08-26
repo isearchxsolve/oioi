@@ -162,9 +162,10 @@ class VideoRouterClient:
 
     async def get_job(self, job_id: str) -> VideoJob:
         response = await self.client.get(f"/v1/video/jobs/{job_id}")
-        if response.status_code >= 500:
+        # A router 4xx is a malformed/expired individual poll, not an exception that may
+        # escape the scheduler and abort every other film job in this tick.
+        if response.status_code < 200 or response.status_code >= 300:
             raise self._error(response)
-        response.raise_for_status()
         body = response.json()
         return VideoJob(
             job_id=str(body["jobId"]),
@@ -178,7 +179,10 @@ class VideoRouterClient:
 
     async def capacity(self) -> VideoCapacity:
         response = await self.client.get("/v1/video/capacity")
-        response.raise_for_status()
+        # Capacity is an advisory scheduling read.  Treat every non-success response as
+        # a retryable router condition so completed clips can still materialise/assemble.
+        if response.status_code < 200 or response.status_code >= 300:
+            raise self._error(response)
         body = response.json()
         seats = [
             CapacitySeat(

@@ -35,6 +35,8 @@ class FilmCreateRequest(BaseModel):
     backend: Literal["mock", "live"] = "mock"
     live: bool = False
     max_clips: int = Field(default=0, ge=0)
+    allow_slates: bool = False
+    slate_fraction_limit: float = Field(default=0.05, ge=0.0, le=1.0)
 
 
 class _ServicePool:
@@ -89,6 +91,8 @@ async def create_film(request: FilmCreateRequest):
             style=request.style, image_refs=request.image_refs, seed=request.seed, bible=request.bible,
             admission_mode=request.admission_mode,
             max_clips=request.max_clips if request.backend == "live" else None,
+            allow_slates=request.allow_slates,
+            slate_fraction_limit=request.slate_fraction_limit,
         ))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"film planning/admission failed: {type(exc).__name__}: {exc}") from exc

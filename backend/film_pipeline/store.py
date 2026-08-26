@@ -75,6 +75,9 @@ class FilmJobStore:
                     status TEXT NOT NULL,
                     admission_mode TEXT NOT NULL,
                     capacity_at_admission INTEGER NOT NULL DEFAULT 0,
+                    motion_clip_limit INTEGER NOT NULL DEFAULT 0,
+                    slate_fraction_limit REAL NOT NULL DEFAULT 0.05,
+                    allow_slates INTEGER NOT NULL DEFAULT 0,
                     logical_shots INTEGER NOT NULL DEFAULT 0,
                     unique_jobs INTEGER NOT NULL DEFAULT 0,
                     output_path TEXT,
@@ -91,6 +94,7 @@ class FilmJobStore:
                     image_refs_json TEXT NOT NULL,
                     seed INTEGER,
                     continuity_json TEXT NOT NULL,
+                    hero_shot INTEGER NOT NULL DEFAULT 0,
                     job_key TEXT NOT NULL,
                     PRIMARY KEY (film_id, shot_index)
                 );
@@ -115,6 +119,10 @@ class FilmJobStore:
                     last_polled_at REAL NOT NULL DEFAULT 0,
                     credits_reserved REAL NOT NULL DEFAULT 0,
                     credits_spent REAL NOT NULL DEFAULT 0,
+                    is_fallback INTEGER NOT NULL DEFAULT 0,
+                    fallback_reason TEXT,
+                    fallback_kind TEXT,
+                    fallback_detail TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -138,6 +146,27 @@ class FilmJobStore:
                 );
                 """
             )
+            # The project is intentionally migration-light for the local durable SQLite
+            # store.  Existing film databases must remain resumable after an upgrade.
+            columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(shots)").fetchall()}
+            if "hero_shot" not in columns:
+                conn.execute("ALTER TABLE shots ADD COLUMN hero_shot INTEGER NOT NULL DEFAULT 0")
+            job_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(clip_jobs)").fetchall()}
+            if "is_fallback" not in job_columns:
+                conn.execute("ALTER TABLE clip_jobs ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0")
+            if "fallback_reason" not in job_columns:
+                conn.execute("ALTER TABLE clip_jobs ADD COLUMN fallback_reason TEXT")
+            if "fallback_kind" not in job_columns:
+                conn.execute("ALTER TABLE clip_jobs ADD COLUMN fallback_kind TEXT")
+            if "fallback_detail" not in job_columns:
+                conn.execute("ALTER TABLE clip_jobs ADD COLUMN fallback_detail TEXT")
+            film_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(films)").fetchall()}
+            if "motion_clip_limit" not in film_columns:
+                conn.execute("ALTER TABLE films ADD COLUMN motion_clip_limit INTEGER NOT NULL DEFAULT 0")
+            if "slate_fraction_limit" not in film_columns:
+                conn.execute("ALTER TABLE films ADD COLUMN slate_fraction_limit REAL NOT NULL DEFAULT 0.05")
+            if "allow_slates" not in film_columns:
+                conn.execute("ALTER TABLE films ADD COLUMN allow_slates INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _film(row: sqlite3.Row) -> Dict[str, Any]:
@@ -174,6 +203,9 @@ class FilmJobStore:
         status: str,
         admission_mode: str,
         capacity_at_admission: int,
+        motion_clip_limit: int = 0,
+        slate_fraction_limit: float = 0.05,
+        allow_slates: bool = False,
     ) -> Dict[str, Any]:
         """Create or return the existing film for the exact deterministic request."""
         now = _now()
@@ -182,11 +214,12 @@ class FilmJobStore:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """INSERT INTO films (id,request_key,script,target_seconds,aspect_ratio,bible_json,status,
-                   admission_mode,capacity_at_admission,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   admission_mode,capacity_at_admission,motion_clip_limit,slate_fraction_limit,allow_slates,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(request_key) DO NOTHING""",
                 (film_id, request_key, script, int(target_seconds), aspect_ratio, _dumps(bible), status,
-                 admission_mode, int(capacity_at_admission), now, now),
+                 admission_mode, int(capacity_at_admission), max(0, int(motion_clip_limit)),
+                 min(1.0, max(0.0, float(slate_fraction_limit))), int(bool(allow_slates)), now, now),
             )
             row = conn.execute("SELECT * FROM films WHERE request_key=?", (request_key,)).fetchone()
             conn.commit()
@@ -204,6 +237,16 @@ class FilmJobStore:
                 (status, error, output_path, _now(), film_id),
             )
 
+    def set_slate_policy(self, film_id: str, *, fraction_limit: float, allow_slates: bool) -> None:
+        """Persist quality approval with the durable film, not a process-local flag."""
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """UPDATE films SET slate_fraction_limit=?,
+                   allow_slates=CASE WHEN allow_slates=1 OR ? THEN 1 ELSE 0 END,
+                   updated_at=? WHERE id=?""",
+                (min(1.0, max(0.0, float(fraction_limit))), int(bool(allow_slates)), _now(), film_id),
+            )
+
     def add_shots_and_jobs(self, film_id: str, shots: Iterable[ShotSpec], *, aspect_ratio: str, job_keys: Dict[int, str]) -> None:
         """Persist every logical shot and insert each canonical job once atomically."""
         materialized = list(shots)
@@ -217,10 +260,10 @@ class FilmJobStore:
                 canon = shot.canonical_index if shot.canonical_index is not None else shot.index
                 conn.execute(
                     """INSERT OR IGNORE INTO shots
-                       (film_id,shot_index,canonical_index,prompt,duration_seconds,image_refs_json,seed,continuity_json,job_key)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                       (film_id,shot_index,canonical_index,prompt,duration_seconds,image_refs_json,seed,continuity_json,hero_shot,job_key)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (film_id, shot.index, canon, shot.prompt, int(shot.duration_seconds), _dumps(shot.image_refs),
-                     shot.seed, _dumps(shot.continuity), job_keys[canon]),
+                     shot.seed, _dumps(shot.continuity), int(bool(shot.hero_shot)), job_keys[canon]),
                 )
             for canon, shot in canonical.items():
                 conn.execute(
@@ -240,6 +283,20 @@ class FilmJobStore:
         with self._lock, self._connection() as conn:
             rows = conn.execute("SELECT * FROM shots WHERE film_id=? ORDER BY shot_index", (film_id,)).fetchall()
         return [self._shot(row) for row in rows]
+
+    def shot_for_job(self, film_id: str, job_key: str) -> Optional[Dict[str, Any]]:
+        """Return the first timeline slot for a canonical job.
+
+        A canonical job can serve several identical logical shots.  The first one owns
+        the reference image and continuity metadata used for a keyless fallback; all
+        later slots reuse that same finished local MP4 during ordered assembly.
+        """
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM shots WHERE film_id=? AND job_key=? ORDER BY shot_index LIMIT 1",
+                (film_id, job_key),
+            ).fetchone()
+        return self._shot(row) if row else None
 
     def jobs_for_film(self, film_id: str) -> List[Dict[str, Any]]:
         with self._lock, self._connection() as conn:
@@ -261,11 +318,49 @@ class FilmJobStore:
             rows = conn.execute(
                 """SELECT DISTINCT j.* FROM clip_jobs j JOIN shots s ON s.job_key=j.job_key
                    WHERE s.film_id=? AND j.status IN ('pending','retry_wait','parked_capacity')
-                     AND j.next_attempt_at<=?
-                   ORDER BY j.next_attempt_at,j.created_at LIMIT ?""",
+                      AND j.next_attempt_at<=?
+                    ORDER BY EXISTS(SELECT 1 FROM shots hero WHERE hero.film_id=s.film_id
+                                    AND hero.job_key=j.job_key AND hero.hero_shot=1) DESC,
+                             j.next_attempt_at,j.created_at LIMIT ?""",
                 (film_id, now, int(limit)),
             ).fetchall()
         return [self._job(row) for row in rows]
+
+    def claim_for_submit(self, job_key: str, *, provider: str, seat: Optional[str], now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """Atomically give one scheduler tick the exclusive right to POST this job.
+
+        ``submitting`` is durable before the network request.  A concurrent tick observes
+        that state and cannot buy a second clip for the same stable job key.
+        """
+        now = _now() if now is None else now
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                """UPDATE clip_jobs SET status='submitting',provider=?,seat=?,attempts=attempts+1,
+                   updated_at=? WHERE job_key=? AND status IN ('pending','retry_wait','parked_capacity')
+                   AND next_attempt_at<=?""",
+                (provider, seat, now, job_key, now),
+            ).rowcount
+            row = conn.execute("SELECT * FROM clip_jobs WHERE job_key=?", (job_key,)).fetchone() if changed else None
+            conn.commit()
+        return self._job(row) if row else None
+
+    def recover_stale_claims(self, film_id: str, *, age_seconds: float = 90.0) -> int:
+        """Release a claim left behind by a process crash before/after ``POST``.
+
+        Retrying the exact durable ``job_key`` is safe under the frozen router's
+        idempotency rule.  The conservative age avoids racing an ordinary slow HTTP
+        request while making a dead worker resumable without manual database edits.
+        """
+        cutoff = _now() - max(5.0, float(age_seconds))
+        with self._lock, self._connection() as conn:
+            changed = conn.execute(
+                """UPDATE clip_jobs SET status='retry_wait',next_attempt_at=?,
+                   last_error=COALESCE(last_error,'recovered stale submit claim'),updated_at=?
+                   WHERE source_film_id=? AND status='submitting' AND updated_at<=?""",
+                (_now(), _now(), film_id, cutoff),
+            ).rowcount
+        return int(changed)
 
     def due_polls(self, film_id: str, *, poll_interval_seconds: float = 5.0, now: Optional[float] = None) -> List[Dict[str, Any]]:
         now = _now() if now is None else now
@@ -283,7 +378,7 @@ class FilmJobStore:
         with self._lock, self._connection() as conn:
             conn.execute(
                 """UPDATE clip_jobs SET status='queued',remote_job_id=?,provider=?,seat=?,credits_reserved=?,
-                   attempts=attempts+1,next_attempt_at=0,updated_at=? WHERE job_key=?""",
+                   next_attempt_at=0,updated_at=? WHERE job_key=? AND status='submitting'""",
                 (remote_job_id, provider, seat, float(credits_reserved), _now(), job_key),
             )
 
@@ -293,6 +388,54 @@ class FilmJobStore:
             conn.execute("UPDATE clip_jobs SET attempts=attempts+1,updated_at=? WHERE job_key=?", (_now(), job_key))
             row = conn.execute("SELECT attempts FROM clip_jobs WHERE job_key=?", (job_key,)).fetchone()
         return int(row["attempts"] if row else 0)
+
+    def note_poll_transport_error(self, job_key: str, error: str) -> None:
+        """Record a poll-network problem without charging it to render attempts.
+
+        The remote job may still be queued or running.  Its durable state remains queued/
+        running and the normal poll interval gates the next GET.
+        """
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                "UPDATE clip_jobs SET last_error=?,last_polled_at=?,updated_at=? WHERE job_key=?",
+                (error[:1000], _now(), _now(), job_key),
+            )
+
+    def mark_fallback_pending(self, job_key: str, reason: str) -> None:
+        """Convert an unavailable motion slot into a local keyless fallback slot."""
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """UPDATE clip_jobs SET status='fallback_pending',is_fallback=1,fallback_reason=?,
+                   last_error=?,next_attempt_at=0,updated_at=? WHERE job_key=?""",
+                (reason[:1000], reason[:1000], _now(), job_key),
+            )
+
+    def fallback_jobs(self, film_id: str, *, limit: int = 1000) -> List[Dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT j.* FROM clip_jobs j JOIN shots s ON s.job_key=j.job_key
+                   WHERE s.film_id=? AND j.status='fallback_pending' AND j.next_attempt_at<=?
+                   ORDER BY EXISTS(SELECT 1 FROM shots hero WHERE hero.film_id=s.film_id
+                                   AND hero.job_key=j.job_key AND hero.hero_shot=1) DESC,
+                            j.created_at LIMIT ?""",
+                (film_id, _now(), int(limit)),
+            ).fetchall()
+        return [self._job(row) for row in rows]
+
+    def mark_fallback_success(
+        self,
+        job_key: str,
+        local_path: str,
+        *,
+        kind: str,
+        detail: Optional[str] = None,
+    ) -> None:
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """UPDATE clip_jobs SET status='succeeded',provider=?,local_path=?,
+                   is_fallback=1,fallback_kind=?,fallback_detail=?,last_error=NULL,updated_at=? WHERE job_key=?""",
+                (f"fallback_{kind}", local_path, kind, (detail or "")[:1000], _now(), job_key),
+            )
 
     def mark_poll(self, job_key: str, *, status: str, provider: str, url: Optional[str], error: Optional[str], credits_spent: float) -> None:
         with self._lock, self._connection() as conn:
@@ -329,6 +472,60 @@ class FilmJobStore:
     def quarantine(self, job_key: str, error: str) -> None:
         self.defer(job_key, status="quarantined", seconds=0, error=error)
 
+    def terminal_failures(self, film_id: str) -> List[Dict[str, Any]]:
+        """Jobs that cannot progress or assemble without a deliberate recovery action."""
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT j.* FROM clip_jobs j JOIN shots s ON s.job_key=j.job_key
+                   WHERE s.film_id=? AND j.status IN ('quarantined','parked_wall')
+                   ORDER BY j.updated_at,j.job_key""",
+                (film_id,),
+            ).fetchall()
+        return [self._job(row) for row in rows]
+
+    def remote_submission_count(self, film_id: str) -> int:
+        """Number of durable motion jobs that have crossed the router boundary.
+
+        This survives an API/worker restart, unlike a client-process counter, and is
+        therefore the final safety gate for a per-film live-motion allowance.
+        """
+        with self._lock, self._connection() as conn:
+            row = conn.execute(
+                """SELECT COUNT(DISTINCT j.job_key) AS n FROM clip_jobs j
+                   JOIN shots s ON s.job_key=j.job_key
+                   WHERE s.film_id=? AND j.remote_job_id IS NOT NULL""",
+                (film_id,),
+            ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def fallback_quality(self, film_id: str) -> Dict[str, Any]:
+        """Return job and logical-shot fidelity counts for finalization policy.
+
+        Logical shots are the customer-visible timeline: one slate job reused by sixty
+        identical slots is sixty slate cuts, not merely one slate job.
+        """
+        with self._lock, self._connection() as conn:
+            kinds = conn.execute(
+                """SELECT COALESCE(j.fallback_kind,'unknown') AS kind, COUNT(DISTINCT j.job_key) AS n
+                   FROM clip_jobs j JOIN shots s ON s.job_key=j.job_key
+                   WHERE s.film_id=? AND j.is_fallback=1 GROUP BY COALESCE(j.fallback_kind,'unknown')""",
+                (film_id,),
+            ).fetchall()
+            total = conn.execute("SELECT COUNT(*) AS n FROM shots WHERE film_id=?", (film_id,)).fetchone()
+            slate = conn.execute(
+                """SELECT COUNT(*) AS n FROM shots s JOIN clip_jobs j ON j.job_key=s.job_key
+                   WHERE s.film_id=? AND j.fallback_kind='slate'""",
+                (film_id,),
+            ).fetchone()
+        total_logical = int(total["n"] if total else 0)
+        slate_logical = int(slate["n"] if slate else 0)
+        return {
+            "fallback_kinds": {str(row["kind"]): int(row["n"]) for row in kinds},
+            "logical_shots": total_logical,
+            "slate_logical_shots": slate_logical,
+            "slate_fraction": (slate_logical / total_logical) if total_logical else 0.0,
+        }
+
     def mark_seat_unavailable(self, seat: str, provider: str, reason: str) -> None:
         if not seat:
             return
@@ -346,7 +543,7 @@ class FilmJobStore:
     def jobs_using_seat(self, provider: str, seat: str) -> int:
         with self._lock, self._connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM clip_jobs WHERE provider=? AND seat=? AND status IN ('queued','running')",
+                "SELECT COUNT(*) AS n FROM clip_jobs WHERE provider=? AND seat=? AND status IN ('submitting','queued','running')",
                 (provider, seat),
             ).fetchone()
         return int(row["n"] if row else 0)
@@ -354,7 +551,7 @@ class FilmJobStore:
     def provider_inflight(self, provider: str) -> int:
         with self._lock, self._connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM clip_jobs WHERE provider=? AND status IN ('queued','running')", (provider,)
+                "SELECT COUNT(*) AS n FROM clip_jobs WHERE provider=? AND status IN ('submitting','queued','running')", (provider,)
             ).fetchone()
         return int(row["n"] if row else 0)
 
@@ -405,6 +602,8 @@ class FilmJobStore:
             "projected_total": round(spent + remaining * average, 2),
             "by_provider": by_provider, "by_seat": by_seat,
             "unique_jobs": len(jobs), "completed_jobs": completed,
+            "fallback_jobs": sum(1 for job in jobs if bool(job.get("is_fallback"))),
+            **self.fallback_quality(film_id),
         }
 
     def summary(self, film_id: str) -> Dict[str, Any]:

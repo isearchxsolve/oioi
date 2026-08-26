@@ -1,6 +1,6 @@
-# Agent Contracts for OiiOii.ai Clone 7-Agent Animation Pipeline
-# This file defines the data models and interfaces for the 7-agent pipeline.
-# Scriptwriter -> Art Director -> Character Designer -> Scene Designer -> Animator -> Sound Director -> Director
+# Agent Contracts for OiiOii.ai Clone 7-stage Animation Pipeline
+# Scriptwriter -> Art Director -> Character Designer -> Scene Designer -> Storyboard
+# Artist -> Animator -> Sound Director, coordinated and approved by the Director.
 
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -11,6 +11,7 @@ class AgentType(str, Enum):
     ART_DIRECTOR = 'art_director'
     CHARACTER_DESIGNER = 'character_designer'
     SCENE_DESIGNER = 'scene_designer'
+    STORYBOARD_ARTIST = 'storyboard_artist'
     ANIMATOR = 'animator'
     SOUND_DIRECTOR = 'sound_director'
     DIRECTOR = 'director'
@@ -94,6 +95,7 @@ class DirectorInput(AgentInput):
     art_director_output: ArtDirectorOutput
     character_designer_output: CharacterDesignerOutput
     scene_designer_output: SceneDesignerOutput
+    storyboard_artist_output: Optional[StoryboardArtistOutput] = None
     animator_output: AnimatorOutput
     sound_director_output: SoundDirectorOutput
 
@@ -120,6 +122,10 @@ class AgentOrchestrator(ABC):
 
     @abstractmethod
     def run_scene_designer(self, input: SceneDesignerInput) -> SceneDesignerOutput:
+        pass
+
+    @abstractmethod
+    def run_storyboard_artist(self, input: StoryboardArtistInput) -> StoryboardArtistOutput:
         pass
 
     @abstractmethod

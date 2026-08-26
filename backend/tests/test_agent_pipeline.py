@@ -156,6 +156,7 @@ class TestAgentPipeline:
         assert agent_contracts.AgentType.ART_DIRECTOR.value == 'art_director'
         assert agent_contracts.AgentType.CHARACTER_DESIGNER.value == 'character_designer'
         assert agent_contracts.AgentType.SCENE_DESIGNER.value == 'scene_designer'
+        assert agent_contracts.AgentType.STORYBOARD_ARTIST.value == 'storyboard_artist'
         assert agent_contracts.AgentType.ANIMATOR.value == 'animator'
         assert agent_contracts.AgentType.SOUND_DIRECTOR.value == 'sound_director'
         assert agent_contracts.AgentType.DIRECTOR.value == 'director'

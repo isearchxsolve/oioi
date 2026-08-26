@@ -577,6 +577,8 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
             user_prompt += f"Art Director: {json.dumps(input.art_director_output.dict(), indent=2)}\n"
             user_prompt += f"Character Designer: {json.dumps(input.character_designer_output.dict(), indent=2)}\n"
             user_prompt += f"Scene Designer: {json.dumps(input.scene_designer_output.dict(), indent=2)}\n"
+            if input.storyboard_artist_output is not None:
+                user_prompt += f"Storyboard Artist: {json.dumps(input.storyboard_artist_output.dict(), indent=2)}\n"
             user_prompt += f"Animator: {json.dumps(input.animator_output.dict(), indent=2)}\n"
             user_prompt += f"Sound Director: {json.dumps(input.sound_director_output.dict(), indent=2)}"
             from providers.base import ChatCompletionRequest
@@ -640,10 +642,19 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         # Scene Designer
         scene_input = SceneDesignerInput(art_director_output=art_output)
         scene_output = await self.run_scene_designer(scene_input, project_id=project_id)
+        # Storyboard Artist: the Director-approved panel order is the hand-off from
+        # design to animation.  Omitting this call made the implemented stage invisible
+        # and let the Animator invent a fresh, potentially expensive shot list.
+        storyboard_input = StoryboardArtistInput(
+            scene_designer_output=scene_output,
+            character_designer_output=char_output,
+        )
+        storyboard_output = await self.run_storyboard_artist(storyboard_input, project_id=project_id)
         # Animator
         anim_input = AnimatorInput(
             scene_designer_output=scene_output,
             character_designer_output=char_output,
+            storyboard_artist_output=storyboard_output,
         )
         anim_output = await self.run_animator(anim_input, project_id=project_id)
         # Sound Director
@@ -658,6 +669,7 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
             art_director_output=art_output,
             character_designer_output=char_output,
             scene_designer_output=scene_output,
+            storyboard_artist_output=storyboard_output,
             animator_output=anim_output,
             sound_director_output=sound_output,
         )
@@ -668,6 +680,7 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
             "art_director": art_output.dict(),
             "character_designer": char_output.dict(),
             "scene_designer": scene_output.dict(),
+            "storyboard_artist": storyboard_output.dict(),
             "animator": anim_output.dict(),
             "sound_director": sound_output.dict(),
             "director": director_output.dict(),
@@ -703,6 +716,9 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         elif agent_type == "scene_designer":
             input_obj = SceneDesignerInput(**input_data)
             return await self.run_scene_designer(input_obj, project_id=project_id)
+        elif agent_type == "storyboard_artist":
+            input_obj = StoryboardArtistInput(**input_data)
+            return await self.run_storyboard_artist(input_obj, project_id=project_id)
         elif agent_type == "animator":
             input_obj = AnimatorInput(**input_data)
             return await self.run_animator(input_obj, project_id=project_id)
