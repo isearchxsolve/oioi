@@ -14,6 +14,7 @@ from app.api.v1.endpoints import (
     assets,
     jobs,
     agency,
+    films,
 )
 
 # AC-10: NVIDIA NIM router removed. Multi-provider free-tier endpoints connected.
@@ -28,6 +29,7 @@ api_router.include_router(projects.router, prefix="/projects", tags=["Projects"]
 api_router.include_router(pipeline.router, prefix="/projects", tags=["Pipeline"])
 api_router.include_router(assets.router, prefix="/assets", tags=["Assets"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["Jobs"])
+api_router.include_router(films.router, prefix="/films", tags=["Films"])
 api_router.include_router(models.router, prefix="/models", tags=["Models"])
 api_router.include_router(styles.router, prefix="/styles", tags=["Styles"])
 api_router.include_router(providers.router, prefix="/providers", tags=["Providers"])

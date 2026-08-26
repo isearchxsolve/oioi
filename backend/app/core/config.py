@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # 60 admits three Flow clips or ten rtst clips per run; scenes past the ceiling are reported as
     # skipped, never silently dropped and never faked.
     OMNIROUTE_VIDEO_MAX_CREDITS_PER_RUN: int = int(
-        os.getenv("OMNIROUTE_VIDEO_MAX_CREDITS_PER_RUN", "60")
+        os.getenv("OMNIROUTE_VIDEO_MAX_CREDITS_PER_RUN", "200")
     )
 
     # Provider priority (lower = higher priority). Only providers with keys
