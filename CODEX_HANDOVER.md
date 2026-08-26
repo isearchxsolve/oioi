@@ -118,6 +118,11 @@ Consequences for your orchestrator:
    `totalClipsAvailable` merely decides how much of it is true motion. Without it, e2e needs ~360 real
    clips, which 3 Google-SSO seats cannot deliver tonight at any effort. **This is the critical path.**
 
+0b. **Serial submission — measured broken, see §4.3.1.** Your Phase-0 study found the animator
+   delegates *one scene at a time* with no durable clip-job graph. 360 shots serially cannot finish
+   tonight regardless of supply. Needs a clip-job graph plus a raisable concurrency cap. #0 makes the
+   film *possible*; #0b makes it *finish in time*. Neither is optional and neither is a document.
+
 1. **No terminal `failed` state for a film** → a dead clip makes the film un-finalizable, yet `tick`
    re-stamps it `running` forever: infinite re-tick, wasted polls.
 2. **Dedup is inert in the default config → you pay for duplicate clips.** `decompose` gives every shot a
@@ -194,11 +199,15 @@ consistency mechanism available; there is no provider affinity to lean on.
 
 ### 4.3 Still genuinely open — verify and report
 
-1. **In-flight concurrency.** Does the orchestrator keep many video jobs in flight, or submit-then-wait?
-   If it serializes, wall-clock is dead on arrival regardless of supply. **Needs: a concurrency cap you
-   can raise, defaulting to roughly the lane count from `/v1/video/capacity`.** This is the entire reason
-   async exists here — parallelising clips so a 3-hour film renders in under 3 hours. If submission is
-   serial, async bought nothing but a different timeout.
+1. **In-flight concurrency — NO LONGER OPEN. Your own Phase-0 study measured it and it is broken.**
+   `FILM_PIPELINE_PHASE_0_AND_DESIGN.md` records: *"the animator delegates one scene at a time to
+   `agent_pipeline.AnimationPipeline.run_animator`; it reports individual clip URLs but has no durable
+   clip-job graph."* That is serial submission, and it is the wall-clock killer: 360 shots one at a
+   time cannot finish tonight at any provider count. **This is the entire reason the contract is
+   async** — parallelising clips so a long film renders in less than its runtime. If the caller still
+   waits for each clip, async bought nothing but a different timeout. **Needs: a durable clip-job
+   graph plus a concurrency cap you can raise, defaulting to roughly the lane count from
+   `/v1/video/capacity`.** Treat this as P0 #0b, beside the Ken Burns fallback.
 2. **Scale to 360 shots.** Exercised on short films so far. Does `decompose` → 360 shots → 360 jobs hold
    up (DB, memory, tick duration)? A tick that walks all 360 jobs synchronously every pass will crawl.
 3. **Resume.** If the run dies at clip 200 of 360, does re-running resume from the DB or restart? With

@@ -1,5 +1,29 @@
 # CODEX — start here (paste this whole file as your first message)
 
+## READ THIS PARAGRAPH FIRST — the target has changed under you
+
+Stop the documentation pass. `FILM_STUDIO_REMEDIATION_BLUEPRINT.md` (+1,351 lines) and
+`FILM_PIPELINE_PHASE_0_AND_DESIGN.md` describe a **different, later product**: multi-tenant Postgres,
+a dedicated worker service, payment/grant idempotency, tenant isolation, a test pyramid, CI gates,
+runbooks, alerting, support playbooks, a public-launch checklist. All of that is correct work for
+productizing the studio, and **none of it is tonight's deliverable.**
+
+**Tonight's deliverable is one file: a single 30-minute mp4 with audio, produced end to end.** Deadline
+05:00 on 2026-08-27. Nothing ships that isn't that file or a code change that produces it.
+
+Your own Phase-0 study already found the thing that blocks it, and you wrote it down without flagging
+it as the blocker: *"the animator delegates one scene at a time to
+`agent_pipeline.AnimationPipeline.run_animator`; it reports individual clip URLs but has no durable
+clip-job graph."* **Serial submission is the whole problem.** 360 shots one-at-a-time cannot finish
+tonight at any provider count — that is precisely why the contract went async, and async bought nothing
+if the caller still waits for each clip. Fix that and P0 #0 below, and the film is reachable. Write
+another blueprint and it is not.
+
+Also: you have ~5h of headroom and I have ~2. So the work lives on your side. I hold only the `:8189`
+contract and the seats behind it.
+
+---
+
 You own **all of oioi**: `backend/film_pipeline`, `backend/agent_pipeline`, `backend/studio_pipeline`,
 the frontend, the DB. The supply side (`D:\omniroute-monetizer`) owns the video router on `:8189` and
 the chat pool on `:20130`, and nothing else. **Do not import from `omniroute-monetizer`.** If you need
