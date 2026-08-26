@@ -81,29 +81,42 @@ don't time it out. This is also why fix #8 matters — a slow render must never 
 
 ---
 
-## 2. What supply actually looks like (plan against this, not against a guess)
+## 2. What supply actually looks like — MEASURED 2026-08-26, not projected
 
-Supply is **breadth**, not depth. The equation:
+**Correction, and it is the most important number in this document.** An earlier version of this section
+claimed "~600 clips available". That was a *projection* from `providers × seats × free_clips`, and I let
+it read as current state. Measured just now:
 
 ```
-clips_available = providers × google_sso_seats × free_clips_per_account
+session_pool.py list      -> 24 seats dispatchable, ALL 24 modality=chat, ZERO video
+/v1/video/capacity        -> totalClipsAvailable: 0   (PoolEngine.live(modality="video") is empty)
+rtst.ai                   -> 24 credits = 4 clips (vidu 3s@540p), PROVEN e2e (872KB mp4, id 96089)
+heygen.com                -> 3 free renders unused, authenticated, NO ADAPTER BUILT
+digen / kling / openart   -> needs work / balance request-signed / no capacity
 ```
 
-- **3 Google-SSO seats** (three separate Google accounts on three Chrome profiles).
-- **~40 candidate video providers** discovered and scored; 18 confirmed to offer *both* Google SSO and a
-  free tier, and more being wired.
-- Target: **~600 clips available**, against **360 needed** for a 30-minute film at 5s/clip.
+**Real motion clips available tonight: ~4, realistically ~7 if I wire heygen. Against 360 needed. ~2%.**
 
-Consequences for your orchestrator:
+I am not going to close that gap tonight and neither is anyone else: 360 clips at ~4 free clips per
+account needs ~90 successful provider signups, each a browser flow. Breadth is the right long-run
+lever and it is not a tonight lever.
 
-1. **`totalClipsAvailable` is real and it moves.** Read `/v1/video/capacity` before planning; re-read it
-   during the run. It shrinks as free credits burn and grows as I add providers mid-run.
-2. **Breadth is enforced on my side** (per-host lock + per-seat cooldown), so you should keep **many jobs
-   in flight concurrently** — that is the point. Do not serialize clip submission; a 30-min film only
-   renders in ~70 min if ~15 lanes are busy at once.
-3. **`provider` differs per clip and that is correct.** Do not treat a provider change mid-film as an
-   error. Visual consistency comes from prompt + `imageRefs` + `seed`, not from provider affinity.
-4. **`503 no_capacity` is normal, not fatal.** Honour `retryAfterSeconds` and keep the film alive.
+**So read §4.1 again with this in mind: Ken Burns is not a degradation path, it IS the film.** The
+`:8189` pool contributes a handful of hero shots. Concretely, for your orchestrator:
+
+1. **Assume `503 no_capacity` is the DEFAULT answer, not the exception.** Today it is the *only*
+   answer. The film must be complete and watchable with zero clips from me.
+2. **Spend the real clips deliberately.** When capacity is 4, those 4 go to the shots that need true
+   motion — the opening, a climax, whatever the Director marks — not to shots 1-4 in submission order.
+   A `heroShot` flag on `ShotSpec`, or simply "spend capacity on the first N shots the Director ranks",
+   is enough. Do not let FIFO burn the entire motion budget on the title card.
+3. **`totalClipsAvailable` still moves and is still worth reading** — it goes up as I wire providers,
+   and every clip it reports is real. It will not reach 360.
+4. `provider` differs per clip and that is correct. Visual consistency comes from prompt + `imageRefs`
+   + `seed`, never from provider affinity.
+
+Breadth is enforced on my side (per-host lock + per-seat cooldown), so keep **many jobs in flight** —
+see P0 #0b. That stays true whether capacity is 4 or 400.
 
 ---
 
