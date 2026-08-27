@@ -102,6 +102,12 @@ for i in range(len(LLM_MODELS), 25):
 
 MODELS: List[Dict[str, Any]] = VIDEO_MODELS + IMAGE_MODELS + LLM_MODELS
 
+# The API and model picker require a customer-readable label.  IDs remain stable
+# provider-facing identifiers; deriving a conservative title from them avoids a
+# half-populated registry whenever a generated inventory entry is added.
+for _model in MODELS:
+    _model.setdefault('name', _model['id'].replace('-', ' ').replace('_', ' ').title())
+
 
 def group_by_category(models: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Group models by their category field."""

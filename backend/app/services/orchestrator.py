@@ -49,6 +49,7 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         registry: Optional[ProviderRegistry] = None,
         db_session: Optional[Session] = None,
         model: Optional[str] = None,
+        film_orchestrator: Optional[Any] = None,
     ) -> None:
         self.registry = registry or get_registry()
         self.db_session = db_session
@@ -56,6 +57,10 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         # call site, which meant the UI's "AI Model" dropdown could not influence a run: the frontend
         # tracked selectedModel in state and never sent it, and there was nowhere to send it to.
         self.model = model or settings.DEFAULT_CHAT_MODEL
+        # Optional by design: the legacy crew UI can still be used for ideation, but
+        # callers that supply the durable Film Orchestrator get an explicit Director
+        # approved hand-off instead of a second, disconnected render workflow.
+        self.film_orchestrator = film_orchestrator
 
     # ------------------------------------------------------------------ Helper methods
     async def _persist_execution(
@@ -675,7 +680,7 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         )
         director_output = await self.run_director(director_input, project_id=project_id)
 
-        return {
+        result = {
             "scriptwriter": script_output.dict(),
             "art_director": art_output.dict(),
             "character_designer": char_output.dict(),
@@ -685,6 +690,28 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
             "sound_director": sound_output.dict(),
             "director": director_output.dict(),
         }
+        if self.film_orchestrator is None:
+            result["film_handoff"] = {
+                "status": "not_configured",
+                "detail": "No durable FilmOrchestrator was supplied for this crew run.",
+            }
+        elif not director_output.approved:
+            result["film_handoff"] = {
+                "status": "not_approved",
+                "detail": "The Director requested revisions; no durable film was admitted.",
+                "revisions": list(director_output.revisions),
+            }
+        else:
+            # Import here to keep the older app service importable in deployments that
+            # expose the crew only, and to make the explicit dependency injection above
+            # the only way a creative run can admit render work.
+            from film_pipeline.crew import admit_approved_crew_film
+            result["film_handoff"] = await admit_approved_crew_film(
+                self.film_orchestrator,
+                result,
+                target_seconds=duration,
+            )
+        return result
 
     async def retry_agent(self, execution_id: str, project_id: Optional[str] = None) -> Any:
         """Re-run a single failed stage using the typed input stored on the AgentExecution row."""

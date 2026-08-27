@@ -5,7 +5,11 @@ contracts.  It does not import or inspect the provider/router implementation.
 """
 
 from .clients import ChatPoolClient, VideoRouterClient
+from .crew import ApprovedCrewHandoff, CrewHandoffError, admit_approved_crew_film, build_approved_crew_handoff
 from .orchestrator import FilmOrchestrator, FilmRequest
 from .store import FilmJobStore
 
-__all__ = ["ChatPoolClient", "VideoRouterClient", "FilmJobStore", "FilmOrchestrator", "FilmRequest"]
+__all__ = [
+    "ApprovedCrewHandoff", "ChatPoolClient", "CrewHandoffError", "FilmJobStore", "FilmOrchestrator", "FilmRequest",
+    "VideoRouterClient", "admit_approved_crew_film", "build_approved_crew_handoff",
+]

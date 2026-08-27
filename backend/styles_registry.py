@@ -30,7 +30,9 @@ for i in range(150):
         'name': style_name,
         'category': category,
         'thumbnail': f'https://cdn.pollinations.ai/prompt/{style_id}.png',
-        'previewUrl': f'https://pollinations.ai/previews/{style_id}.jpg',
+        # This is an actual image-generation endpoint, unlike the retired
+        # pollinations.ai/previews path which produced stale/non-image links.
+        'previewUrl': f'https://image.pollinations.ai/prompt/{style_id}?width=512&height=512&nologo=true',
         'promptSuffix': f' in {category.lower()} style, high quality, detailed',
         'isBuiltIn': True
     })

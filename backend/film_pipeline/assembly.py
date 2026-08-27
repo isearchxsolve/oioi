@@ -316,6 +316,7 @@ class IncrementalAssembler:
         transition: str = "hard-cut",
         narration: Optional[Path] = None,
         music: Optional[Path] = None,
+        effects: Optional[Path] = None,
     ) -> None:
         self.store = store
         self.root = Path(artifact_root).resolve()
@@ -323,6 +324,7 @@ class IncrementalAssembler:
         self.transition = transition
         self.narration = narration
         self.music = music
+        self.effects = effects
 
     def clip_path(self, film_id: str, job_key: str) -> Path:
         return self.root / film_id / "clips" / f"{job_key}.mp4"
@@ -407,6 +409,13 @@ class IncrementalAssembler:
         if not await media.is_playable(raw):
             await media.concat_copy(segment_paths, raw, manifest=final_dir / "final_concat.txt")
         if not await media.is_playable(final):
-            await media.mix_final_audio(raw, final, narration=self.narration, music=self.music, loop_music=True)
+            await media.mix_final_audio(
+                raw,
+                final,
+                narration=self.narration,
+                music=self.music,
+                effects=self.effects,
+                loop_music=True,
+            )
         self.store.set_film_status(film_id, "completed", output_path=str(final))
         return final

@@ -155,6 +155,137 @@ def _extract_json(text: str) -> Any:
         ) from exc
 
 
+_CREW_CAMERA_MOVES = (
+    "slow push in", "pan left", "pan right", "zoom out", "tilt up", "tilt down",
+)
+
+
+def _crew_mapping(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _crew_items(value: Any) -> List[Dict[str, Any]]:
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _crew_scene_number(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _approved_crew_shots(
+    *,
+    script: str,
+    target_seconds: int,
+    bible: Dict[str, Any],
+    seed: Optional[int],
+) -> List[ShotSpec]:
+    """Expand the Director-approved crew package into the durable shot graph locally.
+
+    This is deliberately not a second LLM storyboard pass.  When a crew hand-off is
+    present, the approved scene design, panels, animator plan and sound plan are the
+    source of truth.  Five-second slots are only an editorial expansion needed by the
+    render substrate; their text and continuity remain traceable to that package.
+    """
+    crew = _crew_mapping(bible.get("crew"))
+    scriptwriter = _crew_mapping(crew.get("scriptwriter"))
+    script_scenes = _crew_items(scriptwriter.get("scenes"))
+    if not script_scenes:
+        return []
+    scene_designs = _crew_items(_crew_mapping(crew.get("scene_designer")).get("scenes"))
+    panels = _crew_items(_crew_mapping(crew.get("storyboard_artist")).get("panels"))
+    animations = _crew_items(_crew_mapping(crew.get("animator")).get("animations"))
+    art = _crew_mapping(crew.get("art_director"))
+
+    durations: List[int] = []
+    for scene in script_scenes:
+        try:
+            durations.append(max(1, int(scene.get("duration", 5))))
+        except (TypeError, ValueError):
+            durations.append(5)
+    nominal_total = max(1, sum(durations))
+    total = max(1, int(math.ceil(int(target_seconds) / 5)))
+    output: List[ShotSpec] = []
+    refs = merge_image_refs(bible.get("imageRefs") or [])
+    visual_scene_number = 0
+    prior_approved_scene = -1
+    for index in range(total):
+        # Map the render grid back onto the approved script clock. This preserves the
+        # relative scene length even when a caller asks for a longer/shorter delivery.
+        timeline_second = (index * 5.0) * nominal_total / max(1.0, float(target_seconds))
+        elapsed = 0.0
+        scene_index = len(script_scenes) - 1
+        for candidate, duration in enumerate(durations):
+            if timeline_second < elapsed + duration:
+                scene_index = candidate
+                break
+            elapsed += duration
+        scene_number = scene_index + 1
+        scene = script_scenes[scene_index]
+        design = scene_designs[scene_index] if scene_index < len(scene_designs) else {}
+        panel = next((item for item in panels if _crew_scene_number(item.get("scene")) == scene_number), {})
+        animation = next((item for item in animations if _crew_scene_number(item.get("scene")) == scene_number), {})
+        within_scene = sum(
+            1 for shot in output
+            if int(shot.continuity["shot"].get("approvedSceneNumber", shot.continuity["shot"]["sceneNumber"])) == scene_number
+        )
+        # The image fallback has a deliberate six-move scene grammar.  A long
+        # approved screenplay scene is therefore split into consecutive visual
+        # sequences of at most six slots, never allowed to repeat a camera move
+        # inside one retained-still sequence.
+        scene_shot_number = within_scene % len(_CREW_CAMERA_MOVES) + 1
+        if scene_number != prior_approved_scene or scene_shot_number == 1:
+            visual_scene_number += 1
+            prior_approved_scene = scene_number
+        preferred_move = str(panel.get("camera") or "").strip()
+        moves = ([preferred_move] if preferred_move else []) + [
+            move for move in _CREW_CAMERA_MOVES if move.casefold() != preferred_move.casefold()
+        ]
+        camera_move = moves[scene_shot_number - 1]
+        style = str(art.get("visual_style") or bible.get("style") or "cinematic").strip()
+        still_prompt = " | ".join(filter(None, [
+            str(design.get("prompt") or design.get("description") or scene.get("description") or "").strip(),
+            style,
+            str(panel.get("composition") or "").strip(),
+            f"editorial sequence {visual_scene_number}",
+        ]))
+        prompt = " | ".join(filter(None, [
+            f"Approved scene {scene_number}, editorial beat {within_scene + 1}",
+            str(scene.get("description") or scene.get("prompt") or "").strip(),
+            str(panel.get("action") or panel.get("composition") or "").strip(),
+            str(animation.get("prompt") or animation.get("action") or "").strip(),
+            f"camera: {camera_move}",
+            f"style: {style}",
+        ]))
+        scene_seed = (int(seed) + scene_index) if seed is not None else None
+        output.append(ShotSpec(
+            index=index,
+            prompt=prompt or f"Approved scene {scene_number}, editorial beat {within_scene + 1}",
+            duration_seconds=5,
+            image_refs=refs,
+            seed=(int(seed) + index) if seed is not None else None,
+            continuity={
+                "bible": bible,
+                "shot": {
+                    "stillPrompt": still_prompt or f"Approved scene {scene_number}",
+                    "stillSeed": scene_seed,
+                    "cameraMove": camera_move,
+                    "sceneNumber": visual_scene_number,
+                    "approvedSceneNumber": scene_number,
+                    "sceneShotNumber": scene_shot_number,
+                    "crewApproved": True,
+                    "storyboardPanel": panel,
+                    "animationPlan": animation,
+                },
+                "chat_provider": None,
+            },
+            hero_shot=scene_shot_number == 1,
+        ))
+    return deduplicate_shots(output)
+
+
 class ShotListPlanner:
     """Uses the chat pool in batched calls while retaining a compact continuity bible."""
 
@@ -199,6 +330,12 @@ class ShotListPlanner:
         seed: Optional[int],
     ) -> List[ShotSpec]:
         """Make batched free chat calls (not one call per five-second clip)."""
+        bible = enrich_bible_references(bible)
+        approved = _approved_crew_shots(
+            script=script, target_seconds=target_seconds, bible=bible, seed=seed,
+        )
+        if approved:
+            return approved
         total = max(1, int(math.ceil(int(target_seconds) / 5)))
         output: List[ShotSpec] = []
         # Six editorial moves over one scene still yield a coherent Ken Burns sequence
@@ -206,7 +343,6 @@ class ShotListPlanner:
         scene_size = 6
         scene_still_prompts: Dict[int, str] = {}
         scene_camera_moves: Dict[int, set[str]] = {}
-        bible = enrich_bible_references(bible)
         compact_bible = canonical_json(bible)
         for start in range(0, total, self.batch_size):
             count = min(self.batch_size, total - start)

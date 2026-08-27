@@ -113,17 +113,63 @@ class FilmOrchestrator:
         return min(15 * 60.0, 5.0 * (2 ** max(0, attempts - 1)))
 
     async def _configure_soundtrack(self, film: Dict[str, Any], *, enabled: bool = True) -> None:
-        """Attach a durable Sound Director music bed to this film's final assembly.
+        """Attach durable Sound Director narration, Foley, and music to final assembly.
 
-        A short procedural score loops at mux time, so a 30-minute cut gets actual AAC
-        audio without waiting for a 30-minute source render or relying on a third party.
+        The audio plan lives in the persisted film bible, not a process-local legacy
+        pipeline response.  Consequently a new worker reconstructs the same artifact
+        locations after a crash.  All three local paths work without a media provider:
+        Windows SAPI (or silence) for voice, FFmpeg generated Foley, and an FFmpeg
+        procedural score.  The score loops at mux time rather than rendering a full
+        long-form source track up front.
         """
         self.assembler.narration = None
+        self.assembler.effects = None
         if not enabled:
             self.assembler.music = None
             return
         audio_dir = self.assembler.root / str(film["id"]) / "audio"
+        bible = film.get("bible") if isinstance(film.get("bible"), dict) else {}
+        sound_plan = bible.get("soundPlan") if isinstance(bible.get("soundPlan"), dict) else {}
+        narration_text = str(sound_plan.get("voiceOver") or "").strip()
+        effect_events = sound_plan.get("effects") if isinstance(sound_plan.get("effects"), list) else []
+        narration = audio_dir / "sound_director_narration.m4a"
+        effects = audio_dir / "sound_director_sfx.m4a"
         music = audio_dir / "sound_director_score.m4a"
+        if narration_text:
+            if not narration.exists() or narration.stat().st_size < 1024:
+                try:
+                    await media.synthesize_narration(
+                        narration_text,
+                        narration,
+                        workdir=audio_dir / "narration_work",
+                        # A durable local fallback must not leak screenplay text to a
+                        # keyless public TTS endpoint just because a production has no
+                        # paid voice provider configured.
+                        prefer_network=False,
+                        fallback_duration=min(20.0, max(2.0, float(film.get("target_seconds") or 5))),
+                    )
+                except Exception:
+                    await media.synthesize_silence(
+                        narration,
+                        duration=min(20.0, max(2.0, float(film.get("target_seconds") or 5))),
+                    )
+            self.assembler.narration = narration
+        if effect_events:
+            if not effects.exists() or effects.stat().st_size < 1024:
+                try:
+                    await media.synthesize_sfx_track(
+                        effect_events,
+                        effects,
+                        duration=max(1.0, float(film.get("target_seconds") or 1)),
+                    )
+                except Exception:
+                    # Sound effects may be richer in a live production, but lack of a
+                    # local Foley filter must not drop the complete, audible music bed.
+                    await media.synthesize_silence(
+                        effects,
+                        duration=max(1.0, float(film.get("target_seconds") or 1)),
+                    )
+            self.assembler.effects = effects
         if not music.exists() or music.stat().st_size < 1024:
             duration = min(120.0, max(12.0, float(film.get("target_seconds") or 12)))
             try:

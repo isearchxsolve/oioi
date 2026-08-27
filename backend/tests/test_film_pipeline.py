@@ -15,6 +15,7 @@ from film_pipeline.assembly import (
     SyntheticFallbackClipMaterializer,
 )
 from film_pipeline.clients import VideoNoCapacity, VideoRouterClient
+from film_pipeline.crew import CrewHandoffError, admit_approved_crew_film, build_approved_crew_handoff
 from film_pipeline.mock import DeterministicMockChatClient, MockSeat, MockVideoBackend, MockVideoConfig
 from film_pipeline.orchestrator import FilmOrchestrator, FilmRequest
 from film_pipeline.models import ChatReply, ShotSpec
@@ -33,6 +34,142 @@ def _pipeline(tmp_path: Path, backend: MockVideoBackend) -> FilmOrchestrator:
         fallback_materializer=SyntheticFallbackClipMaterializer(width=64, height=36),
         segment_size=2,
     )
+
+
+def _approved_crew_outputs(*, approved: bool = True) -> dict[str, object]:
+    """A complete hand-off fixture with intentionally different crew contributions."""
+    return {
+        "scriptwriter": {
+            "title": "The Last Signal", "description": "Mara tracks a fading beacon.",
+            "scenes": [
+                {"description": "Mara enters the observatory.", "duration": 5},
+                {"description": "The beacon answers at dawn.", "duration": 5},
+            ],
+            "characters": ["Mara"],
+        },
+        "art_director": {
+            "visual_style": "rainy analogue science fiction", "color_palette": ["#113355", "#d8aa44"],
+            "character_sheet_prompt": "Mara turnaround", "scene_style_prompt": "wet observatory glass",
+        },
+        "character_designer": {"characters": [{"name": "Mara", "description": "weathered engineer", "prompt": "Mara orange parka"}]},
+        "scene_designer": {"scenes": [
+            {"description": "dark observatory", "prompt": "radio telescope in rain"},
+            {"description": "dawn antenna", "prompt": "antenna catching sunrise"},
+        ]},
+        "storyboard_artist": {"panels": [
+            {"scene": 1, "composition": "Mara at window", "camera": "slow push in", "action": "she listens"},
+            {"scene": 2, "composition": "dish against dawn", "camera": "tilt up", "action": "the beacon glows"},
+        ]},
+        "animator": {"animations": [
+            {"scene": 1, "prompt": "Mara turns toward radio", "duration": 5},
+            {"scene": 2, "prompt": "signal blooms", "duration": 5},
+        ]},
+        "sound_director": {
+            "music_prompt": "low analogue drone", "voice_over": "Mara had waited all night for the signal.",
+            "sound_effects": [{"scene": 1, "sfx": "rain on glass", "duration": 2}, {"scene": 2, "effect": "radio chime", "duration": 1}],
+        },
+        "director": {"approved": approved, "final_notes": "Hold on Mara before the reveal.", "revisions": []},
+    }
+
+
+def test_approved_crew_handoff_preserves_all_creative_departments() -> None:
+    handoff = build_approved_crew_handoff(
+        _approved_crew_outputs(),
+        character_refs={"Mara": {"sheetUrl": "https://assets.example/mara-sheet.jpg"}},
+    )
+    bible = handoff.request.bible or {}
+    assert handoff.title == "The Last Signal"
+    assert handoff.request.target_seconds == 10
+    assert "SCENE 1" in handoff.request.script and "Mara at window" in handoff.request.script
+    assert set(bible["crew"]) == {
+        "scriptwriter", "art_director", "character_designer", "scene_designer",
+        "storyboard_artist", "animator", "sound_director", "director",
+    }
+    assert bible["soundPlan"]["voiceOver"] == "Mara had waited all night for the signal."
+    assert [effect["startSeconds"] for effect in bible["soundPlan"]["effects"]] == [0, 5]
+    assert bible["characterRefs"]["Mara"]["sheetUrl"] == "https://assets.example/mara-sheet.jpg"
+
+
+def test_unapproved_crew_package_cannot_enter_the_durable_film_graph() -> None:
+    with pytest.raises(CrewHandoffError, match="has not approved"):
+        build_approved_crew_handoff(_approved_crew_outputs(approved=False))
+
+
+@pytest.mark.asyncio
+async def test_long_approved_scene_expands_locally_in_six_distinct_move_sequences() -> None:
+    crew = _approved_crew_outputs()
+    crew["scriptwriter"]["scenes"] = [{"description": "Mara waits at the radio.", "duration": 30}]  # type: ignore[index]
+    crew["scene_designer"]["scenes"] = [{"description": "observatory", "prompt": "rainy radio room"}]  # type: ignore[index]
+    crew["storyboard_artist"]["panels"] = [{"scene": 1, "composition": "Mara and radio", "camera": "slow push in", "action": "waits"}]  # type: ignore[index]
+    crew["animator"]["animations"] = [{"scene": 1, "prompt": "Mara listens", "duration": 30}]  # type: ignore[index]
+    handoff = build_approved_crew_handoff(crew, target_seconds=30)
+    planner = ShotListPlanner(_MalformedPlannerChat())
+    shots = await planner.decompose(
+        handoff.request.script, target_seconds=30, bible=handoff.request.bible or {}, seed=7,
+    )
+    assert len(shots) == 6
+    assert {shot.continuity["chat_provider"] for shot in shots} == {None}
+    assert len({shot.continuity["shot"]["cameraMove"].casefold() for shot in shots}) == 6
+    assert {shot.continuity["shot"]["sceneNumber"] for shot in shots} == {1}
+
+
+@pytest.mark.asyncio
+async def test_approved_crew_handoff_admits_audio_plan_and_references_to_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct crew-to-store path is provider-free when its local audio mode is used."""
+    async def fake_narration(_: str, dest: Path, **__: object) -> tuple[Path, str]:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"n" * 1024)
+        return dest, "windows-sapi"
+
+    async def fake_sfx(_: object, dest: Path, **__: object) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"s" * 1024)
+        return dest
+
+    async def fake_music(dest: Path, **__: object) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"m" * 1024)
+        return dest
+
+    monkeypatch.setattr(media, "synthesize_narration", fake_narration)
+    monkeypatch.setattr(media, "synthesize_sfx_track", fake_sfx)
+    monkeypatch.setattr(media, "synthesize_music_bed", fake_music)
+    pipeline = _pipeline(tmp_path, MockVideoBackend(MockVideoConfig(seats=[])))
+    handoff = await admit_approved_crew_film(
+        pipeline,
+        _approved_crew_outputs(),
+        character_refs={"Mara": {"sheetUrl": "https://assets.example/mara-sheet.jpg"}},
+    )
+    film_id = handoff["admission"]["film"]["id"]
+    persisted = pipeline.store.get_film(film_id)
+    assert persisted is not None
+    assert persisted["bible"]["crew"]["director"]["approved"] is True
+    assert persisted["bible"]["soundPlan"]["effects"][1]["startSeconds"] == 5
+    assert persisted["bible"]["characterRefs"] == {"Mara": ["https://assets.example/mara-sheet.jpg"]}
+    shots = pipeline.store.shots(film_id)
+    assert all(shot["continuity"]["shot"]["crewApproved"] is True for shot in shots)
+    assert all(shot["continuity"]["chat_provider"] is None for shot in shots)
+    assert "Mara turns toward radio" in shots[0]["prompt"]
+    assert pipeline.assembler.narration is not None and pipeline.assembler.narration.exists()
+    assert pipeline.assembler.effects is not None and pipeline.assembler.effects.exists()
+    assert pipeline.assembler.music is not None and pipeline.assembler.music.exists()
+    await pipeline.aclose()
+
+
+@pytest.mark.asyncio
+async def test_local_scene_timed_sfx_track_requires_no_audio_provider(tmp_path: Path) -> None:
+    track = await media.synthesize_sfx_track(
+        [
+            {"startSeconds": 0, "durationSeconds": 0.5, "description": "rain on observatory glass"},
+            {"startSeconds": 1, "durationSeconds": 0.25, "description": "radio chime"},
+        ],
+        tmp_path / "sound_director_sfx.m4a",
+        duration=2,
+    )
+    assert track.exists() and track.stat().st_size > 1024
+    assert await media.is_playable(track)
 
 
 @pytest.mark.asyncio

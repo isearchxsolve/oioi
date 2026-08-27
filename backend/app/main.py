@@ -58,6 +58,7 @@ os.makedirs(_media_root, exist_ok=True)
 app.mount("/media", StaticFiles(directory=_media_root), name="media")
 
 @app.get("/health")
+@app.get("/healthz", include_in_schema=False)
 async def health_check():
     """Health check endpoint — queries the multi-provider registry snapshot."""
     registry = await get_provider_registry()

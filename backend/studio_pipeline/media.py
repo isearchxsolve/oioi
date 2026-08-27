@@ -319,6 +319,7 @@ async def synthesize_narration(
     lang: str = "en",
     client: Optional[httpx.AsyncClient] = None,
     fallback_duration: float = 4.0,
+    prefer_network: bool = True,
 ) -> Tuple[Path, str]:
     """Render narration to ``dest``, returning ``(path, source_used)``.
 
@@ -326,6 +327,11 @@ async def synthesize_narration(
       1. Google Translate TTS - keyless, verified working, chunked to its ~200 char cap.
       2. Windows SAPI - offline, unlimited length.
       3. Silence of ``fallback_duration`` - keeps the cut's timing intact.
+
+    ``prefer_network=False`` deliberately skips the first tier.  The durable Film
+    Pipeline uses that mode: its local fallback must remain possible when every
+    external provider is unavailable, and it must not quietly send a screenplay to
+    a public TTS service just to complete a fallback edit.
     """
     pieces = chunk_text(text)
     if not pieces:
@@ -333,37 +339,38 @@ async def synthesize_narration(
         return dest, "silence(empty text)"
 
     workdir.mkdir(parents=True, exist_ok=True)
-    owned = client is None
-    http = client or httpx.AsyncClient(follow_redirects=True, headers={"User-Agent": GTTS_UA})
-    try:
-        parts: List[Path] = []
-        for i, piece in enumerate(pieces):
-            part = workdir / f"{dest.stem}_tts_{i:03d}.mp3"
-            try:
-                await download(
-                    google_tts_url(piece, lang=lang, idx=i, total=len(pieces)),
-                    part,
-                    client=http,
-                    timeout=60.0,
-                    attempts=2,
-                    min_bytes=512,
-                )
-                parts.append(part)
-            except MediaError:
-                parts = []
-                break
-        if parts:
-            try:
-                if len(parts) == 1:
-                    shutil.copy2(parts[0], dest)
-                else:
-                    await concat_audio(parts, dest, workdir=workdir)
-                return dest, "google-translate-tts"
-            except MediaError:
-                pass
-    finally:
-        if owned:
-            await http.aclose()
+    if prefer_network:
+        owned = client is None
+        http = client or httpx.AsyncClient(follow_redirects=True, headers={"User-Agent": GTTS_UA})
+        try:
+            parts: List[Path] = []
+            for i, piece in enumerate(pieces):
+                part = workdir / f"{dest.stem}_tts_{i:03d}.mp3"
+                try:
+                    await download(
+                        google_tts_url(piece, lang=lang, idx=i, total=len(pieces)),
+                        part,
+                        client=http,
+                        timeout=60.0,
+                        attempts=2,
+                        min_bytes=512,
+                    )
+                    parts.append(part)
+                except MediaError:
+                    parts = []
+                    break
+            if parts:
+                try:
+                    if len(parts) == 1:
+                        shutil.copy2(parts[0], dest)
+                    else:
+                        await concat_audio(parts, dest, workdir=workdir)
+                    return dest, "google-translate-tts"
+                except MediaError:
+                    pass
+        finally:
+            if owned:
+                await http.aclose()
 
     wav = workdir / f"{dest.stem}_sapi.wav"
     try:
@@ -652,6 +659,94 @@ async def synthesize_music_bed(
     return dest
 
 
+def _sfx_voice(effect: object) -> tuple[float, str, float]:
+    """Choose a small, deterministic Foley voice without interpreting shell text.
+
+    The Sound Director supplies descriptive language.  It is deliberately used only
+    to pick from a fixed FFmpeg filter vocabulary; it is never interpolated into an
+    FFmpeg command.  That makes persisted crew output safe to replay.
+    """
+    text = str(effect or "").casefold()
+    if any(token in text for token in ("rain", "wind", "wave", "static", "rainfall")):
+        return 0.34, "anoisesrc=color=pink:sample_rate=48000", 0.18
+    if any(token in text for token in ("engine", "drone", "rumble", "thunder", "bass")):
+        return 72.0, "sine", 0.16
+    if any(token in text for token in ("beep", "servo", "alarm", "chime", "signal")):
+        return 880.0, "sine", 0.20
+    if any(token in text for token in ("step", "footstep", "knock", "hit", "impact")):
+        return 110.0, "sine", 0.24
+    return 440.0, "sine", 0.12
+
+
+async def synthesize_sfx_track(
+    effects: Sequence[Dict[str, object]],
+    dest: Path,
+    *,
+    duration: float,
+    timeout: float = 1800.0,
+) -> Path:
+    """Render a scene-timed, local Foley bed from the approved sound plan.
+
+    It uses only FFmpeg's built-in tone/noise generators, so it is available without
+    a sound-effect provider or a live generation call.  Each event accepts
+    ``startSeconds``, ``durationSeconds`` and ``description`` (or ``sfx``/``effect``).
+    Events are bounded to keep a malformed crew response from producing an unbounded
+    filter graph.
+    """
+    total = max(0.5, float(duration))
+    normalized: List[tuple[float, float, str]] = []
+    for item in list(effects or [])[:128]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = max(0.0, min(total, float(item.get("startSeconds", 0.0))))
+            length = max(0.08, min(12.0, float(item.get("durationSeconds", item.get("duration", 1.5)))))
+        except (TypeError, ValueError):
+            continue
+        if start >= total:
+            continue
+        description = item.get("description") or item.get("sfx") or item.get("effect") or item.get("prompt") or "foley"
+        normalized.append((start, min(length, total - start), str(description)))
+
+    if not normalized:
+        return await synthesize_silence(dest, duration=total, timeout=timeout)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp" + (dest.suffix or ".m4a"))
+    graph = [f"anullsrc=channel_layout=stereo:sample_rate={AUDIO_RATE}:d={total:.3f}[base]"]
+    labels = ["[base]"]
+    for index, (start, length, description) in enumerate(normalized):
+        frequency, source_kind, volume = _sfx_voice(description)
+        label = f"fx{index}"
+        if source_kind == "sine":
+            source = f"sine=frequency={frequency:.2f}:sample_rate={AUDIO_RATE}:duration={length:.3f}"
+        else:
+            source = f"{source_kind}:duration={length:.3f}"
+        delay = max(0, int(round(start * 1000)))
+        graph.append(
+            f"{source},aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,"
+            f"volume={volume:.3f},afade=t=in:st=0:d=0.03,afade=t=out:st={max(0.0, length - 0.08):.3f}:d=0.08,"
+            f"adelay={delay}|{delay}[{label}]"
+        )
+        labels.append(f"[{label}]")
+    graph.append(
+        f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:dropout_transition=0,"
+        f"atrim=0:{total:.3f},aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo[out]"
+    )
+    res = await run_proc(
+        [
+            ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-filter_complex", ";".join(graph), "-map", "[out]",
+            *_audio_codec_args(dest, "160k"), str(tmp),
+        ],
+        timeout=timeout,
+    )
+    if not res.ok or not tmp.exists():
+        raise MediaError(f"SFX track synthesis failed: {res.tail()}")
+    os.replace(tmp, dest)
+    return dest
+
+
 async def concat_audio(parts: Sequence[Path], dest: Path, *, workdir: Path, timeout: float = 1800.0) -> Path:
     """Concatenate narration fragments into one track via the concat demuxer."""
     usable = [p for p in parts if p.exists() and p.stat().st_size > 512]
@@ -683,6 +778,7 @@ async def mix_final_audio(
     *,
     narration: Optional[Path] = None,
     music: Optional[Path] = None,
+    effects: Optional[Path] = None,
     loop_music: bool = False,
     timeout: float = 3600.0,
 ) -> Path:
@@ -700,7 +796,7 @@ async def mix_final_audio(
     replaced, not mixed. Clips carry a silent track purely so their stream layout matches
     for the concat, so there is nothing to preserve.
     """
-    if narration is None and music is None:
+    if narration is None and music is None and effects is None:
         if video.resolve() != dest.resolve():
             shutil.copy2(video, dest)
         return dest
@@ -709,7 +805,7 @@ async def mix_final_audio(
     tmp = dest.with_suffix(".tmp.mp4")
     inputs: List[str] = ["-i", str(video)]
     idx = 1
-    vo_idx = music_idx = None
+    vo_idx = music_idx = effects_idx = None
     if narration is not None and narration.exists():
         inputs += ["-i", str(narration)]
         vo_idx = idx
@@ -721,19 +817,39 @@ async def mix_final_audio(
         inputs += ["-i", str(music)]
         music_idx = idx
         idx += 1
+    if effects is not None and effects.exists():
+        inputs += ["-i", str(effects)]
+        effects_idx = idx
+        idx += 1
 
+    parts: List[str] = []
+    filters: List[str] = []
     if vo_idx is not None and music_idx is not None:
-        fc = (
-            f"[{vo_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=1.0,asplit=2[vo][key];"
-            f"[{music_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo[mus];"
-            "[mus][key]sidechaincompress=threshold=0.05:ratio=8:attack=20:release=600[ducked];"
-            "[vo][ducked]amix=inputs=2:duration=longest:dropout_transition=3,"
+        filters.extend([
+            f"[{vo_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=1.0,asplit=2[vo][key]",
+            f"[{music_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo[mus]",
+            "[mus][key]sidechaincompress=threshold=0.05:ratio=8:attack=20:release=600[ducked]",
+        ])
+        parts.extend(["[vo]", "[ducked]"])
+    elif vo_idx is not None:
+        filters.append(f"[{vo_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=1.0[vo]")
+        parts.append("[vo]")
+    elif music_idx is not None:
+        filters.append(f"[{music_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=0.25[mus]")
+        parts.append("[mus]")
+    if effects_idx is not None:
+        filters.append(f"[{effects_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=0.85[sfx]")
+        parts.append("[sfx]")
+    if not parts:
+        filters.append(f"anullsrc=channel_layout=stereo:sample_rate={AUDIO_RATE}[aout]")
+    elif len(parts) == 1:
+        filters.append(f"{parts[0]}apad[aout]")
+    else:
+        filters.append(
+            f"{''.join(parts)}amix=inputs={len(parts)}:duration=longest:dropout_transition=3,"
             f"aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,apad[aout]"
         )
-    elif vo_idx is not None:
-        fc = f"[{vo_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,apad[aout]"
-    else:
-        fc = f"[{music_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,apad[aout]"
+    fc = ";".join(filters)
 
     base = [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin", *inputs]
     tail = [
@@ -744,11 +860,18 @@ async def mix_final_audio(
     res = await run_proc(base + ["-filter_complex", fc] + tail, timeout=timeout)
 
     if (not res.ok or not tmp.exists()) and vo_idx is not None and music_idx is not None:
-        flat = (
-            f"[{vo_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=1.0[vo];"
-            f"[{music_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=0.25[mus];"
-            "[vo][mus]amix=inputs=2:duration=longest:dropout_transition=3,apad[aout]"
+        flat_parts = [
+            f"[{vo_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=1.0[vo]",
+            f"[{music_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=0.25[mus]",
+        ]
+        flat_labels = ["[vo]", "[mus]"]
+        if effects_idx is not None:
+            flat_parts.append(f"[{effects_idx}:a]aformat=sample_rates={AUDIO_RATE}:channel_layouts=stereo,volume=0.85[sfx]")
+            flat_labels.append("[sfx]")
+        flat_parts.append(
+            f"{''.join(flat_labels)}amix=inputs={len(flat_labels)}:duration=longest:dropout_transition=3,apad[aout]"
         )
+        flat = ";".join(flat_parts)
         res = await run_proc(base + ["-filter_complex", flat] + tail, timeout=timeout)
 
     if not res.ok or not tmp.exists():
@@ -987,5 +1110,7 @@ __all__ = [
     "streamelements_tts_url",
     "synthesize_kenburns_clip",
     "synthesize_music_bed",
+    "synthesize_narration",
+    "synthesize_sfx_track",
     "write_concat_manifest",
 ]
