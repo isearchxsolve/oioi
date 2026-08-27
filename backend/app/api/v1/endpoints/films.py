@@ -29,6 +29,10 @@ class FilmCreateRequest(BaseModel):
     aspect_ratio: str = "16:9"
     style: str = "cinematic"
     image_refs: list[str] = Field(default_factory=list)
+    character_refs: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Approved character sheet/portrait URLs keyed by character name.",
+    )
     seed: Optional[int] = 20_260_826
     bible: Optional[Dict[str, Any]] = None
     admission_mode: Literal["refuse", "waves"] = "refuse"
@@ -88,7 +92,8 @@ async def create_film(request: FilmCreateRequest):
     try:
         return await orchestrator.request_film(FilmRequest(
             script=request.script, target_seconds=request.target_seconds, aspect_ratio=request.aspect_ratio,
-            style=request.style, image_refs=request.image_refs, seed=request.seed, bible=request.bible,
+            style=request.style, image_refs=request.image_refs, character_refs=request.character_refs,
+            seed=request.seed, bible=request.bible,
             admission_mode=request.admission_mode,
             max_clips=request.max_clips if request.backend == "live" else None,
             allow_slates=request.allow_slates,

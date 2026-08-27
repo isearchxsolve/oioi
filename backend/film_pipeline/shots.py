@@ -19,6 +19,57 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def merge_image_refs(*groups: Iterable[Any]) -> List[str]:
+    """Return stable, de-duplicated visual reference URLs in editorial order."""
+    result: List[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for raw in group:
+            value = str(raw or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                result.append(value)
+    return result
+
+
+def normalize_character_refs(value: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """Normalise the durable character-reference manifest supplied by the crew/API.
+
+    Supports the documented ``sheetUrl`` / ``portraitUrls`` shape as well as a simple
+    list of URLs.  The Film Pipeline only relays approved URLs; it never invents a
+    character image or calls an image provider while planning.
+    """
+    normalized: Dict[str, List[str]] = {}
+    for name, raw in (value or {}).items():
+        values: List[Any] = []
+        if isinstance(raw, dict):
+            values.append(raw.get("sheetUrl"))
+            values.extend(raw.get("portraitUrls") or [])
+            values.extend(raw.get("imageRefs") or [])
+        elif isinstance(raw, (list, tuple, set)):
+            values.extend(raw)
+        else:
+            values.append(raw)
+        refs = merge_image_refs(values)
+        if refs:
+            normalized[str(name)] = refs
+    return normalized
+
+
+def enrich_bible_references(bible: Dict[str, Any], character_refs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Persist approved character art in the bible and attach it to every shot."""
+    enriched = dict(bible or {})
+    normalized = normalize_character_refs(character_refs if character_refs is not None else enriched.get("characterRefs"))
+    if normalized:
+        enriched["characterRefs"] = normalized
+    elif "characterRefs" in enriched:
+        enriched["characterRefs"] = {}
+    enriched["imageRefs"] = merge_image_refs(
+        enriched.get("imageRefs") or [], *(normalized.values()),
+    )
+    return enriched
+
+
 def job_key_for_shot(shot: ShotSpec, *, canonical_index: int) -> str:
     """Caller-side stable idempotency key required by the frozen video contract.
 
@@ -111,14 +162,24 @@ class ShotListPlanner:
         self.chat = chat
         self.batch_size = max(1, int(batch_size))
 
-    async def create_bible(self, script: str, *, style: str = "cinematic", image_refs: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def create_bible(
+        self,
+        script: str,
+        *,
+        style: str = "cinematic",
+        image_refs: Optional[List[str]] = None,
+        character_refs: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         prompt = (
             "Create a compact film continuity bible from this screenplay. Return JSON only with "
             "keys characters (object of stable visual descriptions), wardrobe, locations, lighting, "
             "style, and imageRefs (array). Do not add prose outside JSON.\n\nSCREENPLAY:\n" + script
         )
         reply = await self.chat.message(prompt, max_tokens=1024, model="pool/auto")
-        data = _extract_json(reply.text)
+        try:
+            data = _extract_json(reply.text)
+        except ValueError as exc:
+            raise ValueError(f"planner JSON contract failure from {reply.provider or 'unknown provider'}: {exc}") from exc
         if not isinstance(data, dict):
             raise ValueError("continuity bible must be a JSON object")
         data.setdefault("style", style)
@@ -126,8 +187,8 @@ class ShotListPlanner:
         data.setdefault("wardrobe", "consistent with character bible")
         data.setdefault("locations", [])
         data.setdefault("lighting", "continuous cinematic lighting")
-        data["imageRefs"] = list(image_refs or data.get("imageRefs") or [])
-        return data
+        data["imageRefs"] = merge_image_refs(image_refs or [], data.get("imageRefs") or [])
+        return enrich_bible_references(data, character_refs)
 
     async def decompose(
         self,
@@ -145,6 +206,7 @@ class ShotListPlanner:
         scene_size = 6
         scene_still_prompts: Dict[int, str] = {}
         scene_camera_moves: Dict[int, set[str]] = {}
+        bible = enrich_bible_references(bible)
         compact_bible = canonical_json(bible)
         for start in range(0, total, self.batch_size):
             count = min(self.batch_size, total - start)
@@ -173,7 +235,13 @@ class ShotListPlanner:
             # >45-second timeout observed for larger structured replies.
             reply = await self.chat.message(request, max_tokens=max(1024, count * 150), model="pool/auto")
             provider = reply.provider
-            raw = _extract_json(reply.text)
+            try:
+                raw = _extract_json(reply.text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"planner JSON contract failure in scene batch {start // self.batch_size + 1} "
+                    f"from {provider or 'unknown provider'}: {exc}"
+                ) from exc
             if isinstance(raw, dict):
                 raw = raw.get("shots")
             if not isinstance(raw, list) or len(raw) != count:
@@ -207,9 +275,13 @@ class ShotListPlanner:
                         "every shot in a scene needs a distinct move"
                     )
                 moves.add(camera_move.casefold())
-                refs = item.get("imageRefs", bible.get("imageRefs") or [])
-                if not isinstance(refs, list):
-                    refs = list(bible.get("imageRefs") or [])
+                item_refs = item.get("imageRefs")
+                if not isinstance(item_refs, list):
+                    item_refs = []
+                # Providers may return an empty array even after being given approved
+                # character sheets. The durable bible references are mandatory
+                # continuity inputs, so never let an advisory reply erase them.
+                refs = merge_image_refs(bible.get("imageRefs") or [], item_refs)
                 raw_continuity = item.get("continuity")
                 # The planner's scene identity and camera contract is explicit above.
                 # Ancillary continuity notes may legitimately be a short string from

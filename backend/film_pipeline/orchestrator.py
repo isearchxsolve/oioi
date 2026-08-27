@@ -25,7 +25,7 @@ from .assembly import (
 )
 from .clients import ChatPoolClient, VideoRouterClient
 from .models import VideoAuthError, VideoNoCapacity, VideoTransientError, VideoWallError
-from .shots import ShotListPlanner, job_key_for_shot, request_key_for_film
+from .shots import enrich_bible_references, normalize_character_refs, ShotListPlanner, job_key_for_shot, request_key_for_film
 from .store import FilmJobStore
 
 
@@ -40,6 +40,8 @@ class FilmRequest:
     aspect_ratio: str = "16:9"
     style: str = "cinematic"
     image_refs: List[str] = field(default_factory=list)
+    #: Approved character sheets/portraits, relayed to every generated shot.
+    character_refs: Dict[str, Any] = field(default_factory=dict)
     seed: Optional[int] = 20_260_826
     bible: Optional[Dict[str, Any]] = None
     admission_mode: AdmissionMode = "refuse"
@@ -142,7 +144,11 @@ class FilmOrchestrator:
         if self.execution_backend == "live" and int(request.max_clips or 0) > self.live_max_clips:
             raise ValueError("request max_clips exceeds this live orchestrator's explicit safety cap")
 
-        stable_input_bible = request.bible or {"style": request.style, "imageRefs": request.image_refs}
+        supplied_character_refs = normalize_character_refs(request.character_refs) if request.character_refs else None
+        stable_input_bible = enrich_bible_references(
+            request.bible or {"style": request.style, "imageRefs": request.image_refs},
+            supplied_character_refs,
+        )
         request_key = request_key_for_film(
             script=request.script, target_seconds=target_seconds, aspect_ratio=request.aspect_ratio,
             bible=stable_input_bible, seed=request.seed,
@@ -164,8 +170,11 @@ class FilmOrchestrator:
         bible = (existing or {}).get("bible") or request.bible
         if not bible:
             bible = await self.planner.create_bible(
-                request.script, style=request.style, image_refs=request.image_refs
+                request.script, style=request.style, image_refs=request.image_refs,
+                character_refs=request.character_refs,
             )
+        else:
+            bible = enrich_bible_references(bible, supplied_character_refs)
         shots = await self.planner.decompose(
             request.script, target_seconds=target_seconds, bible=bible, seed=request.seed
         )

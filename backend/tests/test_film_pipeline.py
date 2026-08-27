@@ -17,7 +17,7 @@ from film_pipeline.assembly import (
 from film_pipeline.clients import VideoNoCapacity, VideoRouterClient
 from film_pipeline.mock import DeterministicMockChatClient, MockSeat, MockVideoBackend, MockVideoConfig
 from film_pipeline.orchestrator import FilmOrchestrator, FilmRequest
-from film_pipeline.models import ShotSpec
+from film_pipeline.models import ChatReply, ShotSpec
 from film_pipeline.shots import ShotListPlanner, _extract_json, deduplicate_shots, request_key_for_film
 from film_pipeline.store import FilmJobStore
 from studio_pipeline import media
@@ -186,6 +186,50 @@ async def test_scene_shared_stills_have_six_distinct_camera_moves() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approved_character_references_are_persisted_and_relayed_to_every_shot(tmp_path: Path) -> None:
+    backend = MockVideoBackend(MockVideoConfig(seats=[]))
+    pipeline = _pipeline(tmp_path, backend)
+    admitted = await pipeline.request_film(FilmRequest(
+        script="Mara crosses the observatory in a storm.", target_seconds=10,
+        image_refs=["https://assets.example/background.jpg"],
+        character_refs={
+            "mara": {
+                "sheetUrl": "https://assets.example/mara-sheet.jpg",
+                "portraitUrls": ["https://assets.example/mara-front.jpg", "https://assets.example/mara-profile.jpg"],
+            }
+        },
+        with_audio=False,
+    ))
+    film_id = admitted["film"]["id"]
+    expected = [
+        "https://assets.example/background.jpg",
+        "https://assets.example/mara-sheet.jpg",
+        "https://assets.example/mara-front.jpg",
+        "https://assets.example/mara-profile.jpg",
+    ]
+    film = pipeline.store.get_film(film_id)
+    assert film["bible"]["characterRefs"] == {"mara": expected[1:]}
+    assert film["bible"]["imageRefs"] == expected
+    assert all(shot["image_refs"] == expected for shot in pipeline.store.shots(film_id))
+    await pipeline.aclose()
+
+
+class _MalformedPlannerChat:
+    async def aclose(self) -> None:
+        return None
+
+    async def message(self, *_: object, **__: object) -> ChatReply:
+        return ChatReply(text="not-json", provider="broken-json-seat")
+
+
+@pytest.mark.asyncio
+async def test_planner_contract_error_names_the_provider_without_relaxing_json() -> None:
+    planner = ShotListPlanner(_MalformedPlannerChat())
+    with pytest.raises(ValueError, match="broken-json-seat"):
+        await planner.create_bible("A strict planner diagnostics test.")
+
+
+@pytest.mark.asyncio
 async def test_still_cache_uses_scene_identity_and_reuses_retained_art_after_429(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -250,6 +294,83 @@ async def test_non_image_download_response_is_not_retried(tmp_path: Path) -> Non
         )
     await client.aclose()
     assert calls == 1
+
+
+class _CountingFallback:
+    def __init__(self) -> None:
+        self.indices: list[int] = []
+
+    async def materialize_fallback(self, *, prompt: str, destination: Path, **_: object) -> FallbackMaterialization:
+        self.indices.append(int(prompt.rsplit(" ", 1)[-1]))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"clip")
+        return FallbackMaterialization(destination, "kenburns")
+
+
+@pytest.mark.asyncio
+async def test_resume_after_200_of_360_only_materializes_remaining_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A durable worker restart must never re-render already materialized coverage."""
+    async def fake_playable(path: Path) -> bool:
+        return Path(path).exists()
+
+    async def fake_concat(_: object, dest: Path, **__: object) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"segment")
+        return dest
+
+    async def fake_mix(_: Path, dest: Path, **__: object) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"film")
+        return dest
+
+    monkeypatch.setattr(media, "is_playable", fake_playable)
+    monkeypatch.setattr(media, "concat_copy", fake_concat)
+    monkeypatch.setattr(media, "mix_final_audio", fake_mix)
+
+    store = FilmJobStore(tmp_path / "film_jobs.sqlite3")
+    film = store.create_film(
+        request_key="resume-200-of-360", script="Resume durability proof.", target_seconds=1800,
+        aspect_ratio="16:9", bible={"style": "test", "imageRefs": []}, status="admitted",
+        admission_mode="waves", capacity_at_admission=0,
+    )
+    shots = [ShotSpec(index=index, prompt=f"resume prompt {index}", canonical_index=index) for index in range(360)]
+    job_keys = {index: f"resume-job-{index}" for index in range(360)}
+    store.add_shots_and_jobs(film["id"], shots, aspect_ratio="16:9", job_keys=job_keys)
+    artifact_root = tmp_path / "artifacts"
+    # This simulates the durable checkpoint immediately before a worker crash.
+    from film_pipeline.assembly import IncrementalAssembler
+    pre_crash_assembler = IncrementalAssembler(store, artifact_root, segment_size=60)
+    for index in range(200):
+        path = pre_crash_assembler.clip_path(film["id"], job_keys[index])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"already-rendered")
+        store.mark_fallback_success(job_keys[index], str(path), kind="kenburns")
+    for index in range(200, 360):
+        store.mark_fallback_pending(job_keys[index], "simulated worker crash after slot 200")
+    assert await pre_crash_assembler.assemble_available(film["id"]) is None
+    assert len(store.segments(film["id"])) == 3
+
+    backend = MockVideoBackend(MockVideoConfig(seats=[]))
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=backend.app), base_url="http://mock-video")
+    fallback = _CountingFallback()
+    resumed = FilmOrchestrator(
+        store=store, chat=DeterministicMockChatClient(), video=VideoRouterClient(client=http),
+        artifact_root=artifact_root, materializer=SyntheticClipMaterializer(width=64, height=36),
+        fallback_materializer=fallback, segment_size=60,
+    )
+
+    async def no_soundtrack(*_: object, **__: object) -> None:
+        return None
+
+    resumed._configure_soundtrack = no_soundtrack  # type: ignore[method-assign]
+    outcome = await resumed.tick(film["id"])
+    assert fallback.indices == list(range(200, 360))
+    assert outcome["film"]["status"] == "completed"
+    assert len(store.segments(film["id"])) == 6
+    assert Path(outcome["film"]["output_path"]).exists()
+    await resumed.aclose()
 
 
 @pytest.mark.asyncio
