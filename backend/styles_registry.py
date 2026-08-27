@@ -20,6 +20,26 @@ style_categories = [
     'Futuristic', 'Ancient', 'Medieval', 'Victorian', 'Art Nouveau',
 ]
 
+
+def _canonical_category(category: str) -> str:
+    """Map rich creative labels onto the eight stable picker/filter categories."""
+    value = category.casefold()
+    if "anime" in value or "manga" in value:
+        return "Anime"
+    if value in {"3d", "low poly", "isometric", "glass", "metallic"}:
+        return "3D/CG"
+    if "pixel" in value or value in {"retro", "vintage", "sepia", "film noir"}:
+        return "Pixel/Retro"
+    if value in {"painting", "watercolor", "oil painting", "baroque", "impressionist", "cubist", "renaissance"}:
+        return "Painting"
+    if value in {"realistic", "black & white", "colorful", "earthy", "light"}:
+        return "Photographic"
+    if value in {"cyberpunk", "neon", "sci-fi", "futuristic", "steampunk"}:
+        return "Cyberpunk"
+    if value in {"minimalist", "monochrome", "duotone", "pastel"}:
+        return "Minimalist"
+    return "Illustrated"
+
 # Generate 150+ styles with real URLs
 for i in range(150):
     category = style_categories[i % len(style_categories)]
@@ -28,11 +48,11 @@ for i in range(150):
     STYLES.append({
         'id': style_id,
         'name': style_name,
-        'category': category,
-        'thumbnail': f'https://cdn.pollinations.ai/prompt/{style_id}.png',
+        'category': _canonical_category(category),
         # This is an actual image-generation endpoint, unlike the retired
         # pollinations.ai/previews path which produced stale/non-image links.
         'previewUrl': f'https://image.pollinations.ai/prompt/{style_id}?width=512&height=512&nologo=true',
+        'thumbnail': f'https://image.pollinations.ai/prompt/{style_id}?width=512&height=512&nologo=true',
         'promptSuffix': f' in {category.lower()} style, high quality, detailed',
         'isBuiltIn': True
     })
@@ -50,12 +70,12 @@ def count_by_category(styles: List[Dict[str, Any]]) -> Dict[str, int]:
 def filter_by_category(styles: List[Dict[str, Any]], category: str) -> List[Dict[str, Any]]:
     """Filter styles by category."""
     return [s for s in styles if s.get('category') == category]
-def get_style(style_id: str) -> Optional[Dict[str, Any]]:
+def get_style(style_id: str) -> Dict[str, Any]:
     """Return a style by ID."""
     for s in STYLES:
         if s.get('id') == style_id:
             return s
-    return None
+    return {}
 
 # Export for backward compatibility
 __all__ = ['STYLES', 'count_by_category', 'filter_by_category', 'get_style']

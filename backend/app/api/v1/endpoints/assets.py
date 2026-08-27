@@ -13,13 +13,17 @@ Two different kinds of asset live here, and the distinction matters:
   projects in projects.py. They do NOT survive a restart, which is a real limitation and is
   reported as such by `persistent: false` rather than hidden.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import os
 import time
+import hashlib
+import uuid
 from pathlib import Path
+
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -30,6 +34,8 @@ HARVEST_DIR = Path(
 )
 # Local media written by this app (image/audio adapters).
 STORAGE_DIR = Path(os.getenv("STORAGE_PATH", "./storage")) / "media"
+CHARACTER_REFERENCE_DIR = Path(os.getenv("STORAGE_PATH", "./storage")) / "character_references"
+MAX_CHARACTER_REFERENCE_BYTES = 10 * 1024 * 1024
 
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mov"}
 
@@ -45,6 +51,19 @@ _LIBRARY: Dict[str, Dict[str, Dict[str, Any]]] = {
     "scenes": {},
     "styles": {},
 }
+
+
+def _image_suffix(blob: bytes) -> Optional[str]:
+    """Identify a small, safe allow-list of image containers by magic bytes."""
+    if blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if blob.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if blob.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(blob) >= 12 and blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 def remember_run_outputs(project_id: str, characters: List[Dict[str, Any]],
@@ -82,7 +101,9 @@ def _clips() -> List[Dict[str, Any]]:
     taken from the containing directory name, which is how the router organises its output.
     """
     found: List[Dict[str, Any]] = []
-    roots = [(HARVEST_DIR / d, d) for d in PROVIDER_DIRS] + [(STORAGE_DIR, "local")]
+    roots = [(STORAGE_DIR, "local")]
+    if settings.ENABLE_LEGACY_HARVEST_ASSETS:
+        roots = [(HARVEST_DIR / d, d) for d in PROVIDER_DIRS] + roots
     for root, provider in roots:
         if not root.exists():
             continue
@@ -125,7 +146,8 @@ async def list_assets():
         },
         # Honest about what is durable. Clips are files; the rest is process memory.
         "persistent": {"clips": True, "characters": False, "scenes": False, "styles": False},
-        "sources": {"harvest_dir": str(HARVEST_DIR), "storage_dir": str(STORAGE_DIR)},
+        # Do not reveal machine paths or a sibling router's directory topology.
+        "sources": {"local_media": True, "legacy_harvest_enabled": settings.ENABLE_LEGACY_HARVEST_ASSETS},
     }
 
 
@@ -134,6 +156,56 @@ class SaveStyleRequest(BaseModel):
     name: str
     category: Optional[str] = ""
     promptSuffix: Optional[str] = ""
+
+
+@router.post("/character-references")
+async def upload_character_reference(
+    request: Request,
+    image: UploadFile = File(...),
+    character_name: str = "character",
+    kind: str = "portrait",
+):
+    """Store a customer-provided sheet/portrait without calling an image provider.
+
+    The returned URL is app-controlled and can be reviewed before it is included in a
+    crew admission. The storage is intentionally bounded, identifies the actual image
+    container by signature rather than the client filename, and never retains a raw
+    caller path.
+    """
+    safe_name = " ".join(character_name.split())[:120]
+    if not safe_name:
+        raise HTTPException(status_code=422, detail="character_name is required")
+    if kind not in {"sheet", "portrait", "reference"}:
+        raise HTTPException(status_code=422, detail="kind must be sheet, portrait, or reference")
+    blob = await image.read(MAX_CHARACTER_REFERENCE_BYTES + 1)
+    if len(blob) > MAX_CHARACTER_REFERENCE_BYTES:
+        raise HTTPException(status_code=413, detail="character reference exceeds the 10 MiB limit")
+    suffix = _image_suffix(blob)
+    if suffix is None:
+        raise HTTPException(status_code=415, detail="character reference must be PNG, JPEG, GIF, or WebP")
+    asset_id = uuid.uuid4().hex
+    path = CHARACTER_REFERENCE_DIR / f"{asset_id}{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # ``UploadFile`` data is already fully bounded and the opaque generated filename
+    # prevents user-controlled path traversal or overwriting another reference.
+    path.write_bytes(blob)
+    digest = hashlib.sha256(blob).hexdigest()
+    _LIBRARY["characters"][asset_id] = {
+        "id": asset_id,
+        "name": safe_name,
+        "kind": kind,
+        "bytes": len(blob),
+        "sha256": digest,
+        "saved_at": time.time(),
+        "persistent": True,
+    }
+    return {
+        "assetId": asset_id,
+        "characterName": safe_name,
+        "kind": kind,
+        "sha256": digest,
+        "referenceUrl": str(request.url_for("get_character_reference", asset_id=asset_id)),
+    }
 
 
 @router.post("/styles")
@@ -163,6 +235,8 @@ async def get_clip(provider: str, filename: str):
     """
     for clip in _clips():
         if clip["name"] == filename and clip["provider"] == provider:
+            if provider != "local" and not settings.ENABLE_LEGACY_HARVEST_ASSETS:
+                break
             root = STORAGE_DIR if provider == "local" else HARVEST_DIR / provider
             for candidate in (root / filename, *root.rglob(filename)):
                 if candidate.is_file():
@@ -171,3 +245,17 @@ async def get_clip(provider: str, filename: str):
                     # instead of playing it in the Library's <video> element.
                     return FileResponse(str(candidate), media_type="video/mp4")
     raise HTTPException(status_code=404, detail=f"no clip {provider}/{filename}")
+
+
+@router.get("/character-references/{asset_id}", name="get_character_reference")
+async def get_character_reference(asset_id: str):
+    """Serve one generated-ID character reference from app-owned storage."""
+    if len(asset_id) != 32 or any(ch not in "0123456789abcdef" for ch in asset_id):
+        raise HTTPException(status_code=404, detail="character reference not found")
+    matches = list(CHARACTER_REFERENCE_DIR.glob(f"{asset_id}.*"))
+    if len(matches) != 1 or not matches[0].is_file():
+        raise HTTPException(status_code=404, detail="character reference not found")
+    media_type = {".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}.get(
+        matches[0].suffix.lower(), "application/octet-stream"
+    )
+    return FileResponse(str(matches[0]), media_type=media_type)

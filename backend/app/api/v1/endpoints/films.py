@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from film_pipeline.assembly import HttpClipMaterializer, SyntheticClipMaterializer
 from film_pipeline.clients import ChatPoolClient, VideoRouterClient
+from film_pipeline.crew import CrewHandoffError, admit_approved_crew_film
 from film_pipeline.mock import DeterministicMockChatClient, MockVideoBackend
 from film_pipeline.orchestrator import FilmOrchestrator, FilmRequest
 from film_pipeline.store import FilmJobStore
@@ -41,6 +43,39 @@ class FilmCreateRequest(BaseModel):
     max_clips: int = Field(default=0, ge=0)
     allow_slates: bool = False
     slate_fraction_limit: float = Field(default=0.05, ge=0.0, le=1.0)
+
+
+class CrewFilmAdmissionRequest(BaseModel):
+    """A Director-approved seven-stage package ready for durable local admission.
+
+    This endpoint intentionally has no ``backend``/``live`` switches. It only creates
+    the durable plan using the zero-credit in-process service; scheduling paid motion
+    remains the separately gated durable film API operation.
+    """
+    crew_outputs: Dict[str, Any]
+    target_seconds: Optional[int] = Field(default=None, ge=5)
+    aspect_ratio: str = "16:9"
+    image_refs: list[str] = Field(default_factory=list)
+    character_refs: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _approved_https_refs(values: list[str] | Dict[str, Any]) -> list[str] | Dict[str, list[str]]:
+    """Accept only provider-safe approved references; never fetch caller URLs here."""
+    from film_pipeline.shots import normalize_character_refs
+
+    if isinstance(values, dict):
+        normalized = normalize_character_refs(values)
+        candidates = [url for urls in normalized.values() for url in urls]
+    else:
+        normalized = None
+        candidates = values
+    if len(candidates) > 32:
+        raise ValueError("at most 32 approved image references may be attached to one film")
+    for raw in candidates:
+        parsed = urlparse(str(raw))
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("approved image references must be absolute HTTPS URLs")
+    return normalized if normalized is not None else [str(value) for value in candidates]
 
 
 class _ServicePool:
@@ -104,6 +139,26 @@ async def create_film(request: FilmCreateRequest):
     finally:
         if request.backend == "live":
             await orchestrator.aclose()
+
+
+@router.post("/crew-admissions")
+async def admit_crew_film(request: CrewFilmAdmissionRequest):
+    """Persist an approved crew package without contacting a generation provider."""
+    try:
+        image_refs = _approved_https_refs(request.image_refs)
+        character_refs = _approved_https_refs(request.character_refs)
+        return await admit_approved_crew_film(
+            _services.get("mock"),
+            request.crew_outputs,
+            target_seconds=request.target_seconds,
+            aspect_ratio=request.aspect_ratio,
+            image_refs=image_refs,
+            character_refs=character_refs,
+        )
+    except (CrewHandoffError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"crew film admission failed: {type(exc).__name__}: {exc}") from exc
 
 
 @router.get("/{film_id}")

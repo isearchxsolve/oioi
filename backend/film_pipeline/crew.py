@@ -215,6 +215,15 @@ async def admit_approved_crew_film(
     """Persist the approved crew package and its planned shots in ``FilmJobStore``."""
     handoff = build_approved_crew_handoff(crew_outputs, **kwargs)
     admission = await orchestrator.request_film(handoff.request)
+    # ``request_film`` intentionally returns a compact form on an idempotent replay.
+    # The crew endpoint has one stable admission contract, so expose its acceptance
+    # truth on both first admission and replay rather than forcing an API caller to
+    # infer it from a nested status.
+    admission.setdefault(
+        "accepted",
+        str((admission.get("film") or {}).get("status") or "")
+        not in {"refused_capacity", "refused_safety_cap", "failed", "assembly_error"},
+    )
     return {
         "title": handoff.title,
         "admission": admission,

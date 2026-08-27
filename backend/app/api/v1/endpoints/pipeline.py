@@ -6,6 +6,7 @@ from agent_pipeline import create_animation_pipeline
 from app.core.config import settings
 from app.services.provider_service import get_provider_registry
 from app.api.v1.endpoints.assets import remember_run_outputs
+from app.api.v1.endpoints.legacy import require_legacy_demo_mode
 
 router = APIRouter()
 
@@ -148,6 +149,7 @@ async def run_pipeline_full(project_id: str, request: PipelineRunRequest):
     AND no clip reported an error, and "completed_with_errors" otherwise. The old placeholder
     behaviour -- report success, hand back a stock video of a different film -- is gone.
     """
+    require_legacy_demo_mode()
     registry = await get_provider_registry()
     pipeline = create_animation_pipeline(registry, model=request.model)
     active_pipelines[project_id] = pipeline
@@ -233,6 +235,7 @@ async def run_pipeline_scriptwriter(project_id: str, request: PipelineRunRequest
 @router.post("/{project_id}/pipeline/animate")
 async def run_pipeline_animate(project_id: str, request: PipelineAnimateRequest):
     """Run Agents 5-7 (Animator to Director) after human approval."""
+    require_legacy_demo_mode()
     pipeline = active_pipelines.get(project_id)
     if not pipeline:
         # Recreate if lost from memory

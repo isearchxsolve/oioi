@@ -49,15 +49,7 @@ async def list_projects():
 async def get_project(project_id: str):
     """Get project details and canvas state."""
     if project_id not in _PROJECTS_DB:
-        # Mock default project for seamless experience
-        return {
-            "id": project_id,
-            "title": "Default Project",
-            "description": "Auto-generated workspace",
-            "aspect_ratio": "16:9",
-            "canvas_state": {"panels": [], "links": []},
-            "status": "active",
-        }
+        raise HTTPException(status_code=404, detail="project not found")
     return _PROJECTS_DB[project_id]
 
 
@@ -65,18 +57,11 @@ async def get_project(project_id: str):
 async def update_project(project_id: str, request: ProjectUpdateRequest):
     """Update project metadata or canvas state."""
     if project_id not in _PROJECTS_DB:
-        _PROJECTS_DB[project_id] = {
-            "id": project_id,
-            "title": request.title or "Project",
-            "description": request.description or "",
-            "canvas_state": request.canvas_state or {},
-            "status": "active",
-        }
-    else:
-        if request.title:
-            _PROJECTS_DB[project_id]["title"] = request.title
-        if request.description:
-            _PROJECTS_DB[project_id]["description"] = request.description
-        if request.canvas_state:
-            _PROJECTS_DB[project_id]["canvas_state"] = request.canvas_state
+        raise HTTPException(status_code=404, detail="project not found")
+    if request.title:
+        _PROJECTS_DB[project_id]["title"] = request.title
+    if request.description:
+        _PROJECTS_DB[project_id]["description"] = request.description
+    if request.canvas_state:
+        _PROJECTS_DB[project_id]["canvas_state"] = request.canvas_state
     return _PROJECTS_DB[project_id]

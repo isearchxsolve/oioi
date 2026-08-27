@@ -226,10 +226,10 @@ def test_videos_generations_endpoint():
         "prompt": "Camera panning across cyberpunk skyscrapers",
     }
     response = client.post("/api/v1/videos/generations", json=payload)
-    assert response.status_code == 200
+    assert response.status_code == 410
     data = response.json()
-    assert data["status"] == "completed"
-    assert "video_url" in data
+    assert data["detail"]["code"] == "legacy_route_retired"
+    assert data["detail"]["replacement"] == "/api/v1/films"
 
 
 def test_audio_speech_endpoint():
@@ -257,6 +257,9 @@ def test_projects_crud_endpoint():
     assert get_res.status_code == 200
     assert get_res.json()["title"] == "Cyber Samurai Animation"
 
+    assert client.get("/api/v1/projects/does-not-exist").status_code == 404
+    assert client.put("/api/v1/projects/does-not-exist", json={"title": "no upsert"}).status_code == 404
+
 
 def test_pipeline_run_endpoint():
     client = TestClient(app)
@@ -265,10 +268,44 @@ def test_pipeline_run_endpoint():
         "style": "Sci-Fi",
     }
     response = client.post("/api/v1/projects/test-proj-123/pipeline/run", json=payload)
+    assert response.status_code == 410
+    data = response.json()
+    assert data["detail"]["code"] == "legacy_route_retired"
+
+
+def test_character_reference_upload_is_app_controlled_and_provider_free():
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/assets/character-references?character_name=Unit-7&kind=sheet",
+        files={"image": ("untrusted-name.png", b"\x89PNG\r\n\x1a\nlocal-reference", "image/png")},
+    )
+    assert response.status_code == 200
+    asset = response.json()
+    assert asset["characterName"] == "Unit-7"
+    assert len(asset["sha256"]) == 64
+    stored = client.get(asset["referenceUrl"])
+    assert stored.status_code == 200
+    assert stored.headers["content-type"].startswith("image/png")
+
+
+def test_approved_crew_admission_uses_durable_local_film_graph_without_provider():
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/films/crew-admissions",
+        json={
+            "crew_outputs": {role.lower().replace(" ", "_"): value for role, value in MOCK_AGENT_JSON.items()},
+            "target_seconds": 10,
+            "character_refs": {"Unit-7": {"sheetUrl": "https://assets.example/unit-7-sheet.png"}},
+        },
+    )
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "completed"
-    assert len(data["stages"]) == 7
+    assert data["directorApproved"] is True
+    assert data["admission"]["accepted"] is True
+    film_id = data["admission"]["film"]["id"]
+    summary = client.get(f"/api/v1/films/{film_id}")
+    assert summary.status_code == 200
+    assert summary.json()["logical_shots"] == 2
 
 
 def test_models_endpoint():

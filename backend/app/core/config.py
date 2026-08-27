@@ -9,7 +9,15 @@ class Settings(BaseSettings):
     APP_NAME: str = "Film Kit Studio"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
+    APP_ENV: str = os.getenv("APP_ENV", "development")
     API_V1_PREFIX: str = "/api/v1"
+    # The original demo routes submit directly to legacy providers and are not part
+    # of the durable FilmJobStore safety model. They stay retired unless a local
+    # developer deliberately enables mock/demo compatibility.
+    ENABLE_LEGACY_DEMO_ROUTES: bool = os.getenv("ENABLE_LEGACY_DEMO_ROUTES", "false").lower() == "true"
+    # A product server must never enumerate a sibling provider/router's filesystem.
+    # Local app-owned media remains available through its own controlled routes.
+    ENABLE_LEGACY_HARVEST_ASSETS: bool = os.getenv("ENABLE_LEGACY_HARVEST_ASSETS", "false").lower() == "true"
     
     # Server
     HOST: str = "0.0.0.0"

@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.api.v1.endpoints.legacy import require_legacy_demo_mode
 from app.services.provider_service import get_provider_registry
 from providers.base import VideoGenerationRequest as ProviderVideoRequest
 
@@ -46,6 +47,7 @@ async def generate_video(request: VideoGenerationRequest):
     running and still be charging, so a second attempt buys a second clip. One provider, one
     attempt, and an honest error.
     """
+    require_legacy_demo_mode()
     registry = await get_provider_registry()
 
     try:

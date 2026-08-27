@@ -105,8 +105,26 @@ MODELS: List[Dict[str, Any]] = VIDEO_MODELS + IMAGE_MODELS + LLM_MODELS
 # The API and model picker require a customer-readable label.  IDs remain stable
 # provider-facing identifiers; deriving a conservative title from them avoids a
 # half-populated registry whenever a generated inventory entry is added.
+_PROVIDER_ALIASES = {
+    # These catalogue labels were never registered adapters in this app. Map them to
+    # the actual local/keyless capability families instead of advertising a provider
+    # the registry cannot select.
+    "replicate": "local",
+    "fal": "pollinations",
+    "google": "gemini",
+}
+_CAPABILITIES = {
+    "Video": ["video"],
+    "Image": ["image"],
+    "LLM": ["chat"],
+}
 for _model in MODELS:
     _model.setdefault('name', _model['id'].replace('-', ' ').replace('_', ' ').title())
+    _model['provider'] = _PROVIDER_ALIASES.get(_model['provider'], _model['provider'])
+    _model.setdefault('capabilities', list(_CAPABILITIES[_model['category']]))
+    _model.setdefault('latency_ms_est', 750)
+    _model.setdefault('priority', 100)
+    _model.setdefault('enabled', True)
 
 
 def group_by_category(models: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
