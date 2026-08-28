@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     
     JWT_SECRET_KEY: str = "default_secret"
     JWT_SECRET: str = "default_secret"
+
+    # Closed SaaS access model.  OiiOii has no public registration flow: the
+    # operator creates each paid customer's credentials.  The initial owner is
+    # bootstrapped once from environment variables and is deliberately the only
+    # account that can administer users.
+    CLOSED_SAAS_MODE: bool = os.getenv("OIOI_CLOSED_SAAS_MODE", "true").lower() == "true"
+    OWNER_EMAIL: str = os.getenv("OIOI_OWNER_EMAIL", "").strip().lower()
+    OWNER_INITIAL_PASSWORD: str = os.getenv("OIOI_OWNER_INITIAL_PASSWORD", "")
+    AUTH_SESSION_TTL_HOURS: int = int(os.getenv("OIOI_AUTH_SESSION_TTL_HOURS", "168"))
     
     # CORS
     # The UI runs on :3011 (see .claude/launch.json and the dev script), which was NOT in this list

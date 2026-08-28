@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
@@ -8,6 +8,8 @@ import uuid
 
 from app.core.config import settings
 from app.services.provider_service import get_provider_registry
+from app.api.v1.dependencies.auth import get_current_user
+from app.models.user import User
 from providers.base import ChatCompletionRequest as AdapterChatRequest
 
 router = APIRouter()
@@ -128,7 +130,7 @@ class ChatSendRequest(BaseModel):
 
 
 @router.get("/sessions")
-async def list_chat_sessions():
+async def list_chat_sessions(user: User = Depends(get_current_user)):
     """Sessions, newest first. Shape matches the ChatSession interface in ChatMode.tsx."""
     return sorted(
         (
@@ -140,7 +142,7 @@ async def list_chat_sessions():
                 "updatedAt": s["updatedAt"],
                 "mode": s["mode"],
             }
-            for sid, s in chat_sessions.items()
+            for sid, s in chat_sessions.items() if s.get("owner_id") == user.id
         ),
         key=lambda s: s["updatedAt"],
         reverse=True,
@@ -148,7 +150,7 @@ async def list_chat_sessions():
 
 
 @router.post("/send")
-async def send_chat_message(request: ChatSendRequest):
+async def send_chat_message(request: ChatSendRequest, user: User = Depends(get_current_user)):
     """Append a turn to a session and answer it with a real provider call.
 
     Returns {"content": ...} because that is the field ChatMode.tsx reads. "agentUpdates" is
@@ -157,16 +159,20 @@ async def send_chat_message(request: ChatSendRequest):
     """
     sid = request.sessionId or uuid.uuid4().hex[:12]
     now = time.time()
-    session = chat_sessions.setdefault(
-        sid,
-        {
-            "title": request.message[:60] or "New chat",
-            "messages": [],
-            "createdAt": now,
-            "updatedAt": now,
-            "mode": request.mode or "chat",
-        },
-    )
+    existing = chat_sessions.get(sid)
+    if existing is not None and existing.get("owner_id") != user.id:
+        # Session identifiers are unguessable, but do not let a guessed/forwarded
+        # identifier become a cross-customer conversation handle.
+        raise HTTPException(status_code=404, detail="chat session not found")
+    session = existing or {
+        "title": request.message[:60] or "New chat",
+        "messages": [],
+        "createdAt": now,
+        "updatedAt": now,
+        "mode": request.mode or "chat",
+        "owner_id": user.id,
+    }
+    chat_sessions[sid] = session
     session["messages"].append({"role": "user", "content": request.message})
     session["updatedAt"] = now
 

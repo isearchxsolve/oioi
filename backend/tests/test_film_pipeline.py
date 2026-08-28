@@ -701,29 +701,37 @@ async def test_refused_safety_cap_is_terminal_and_360_shot_graph_resumes(tmp_pat
 def test_film_api_mock_e2e_and_live_safety_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The public FastAPI workflow reaches a final playable container without a router."""
     from app.api.v1.endpoints import films
+    from app.api.v1.dependencies.auth import get_current_user
     from app.main import app
+    from app.models.user import User
 
     monkeypatch.setenv("FILM_PIPELINE_STORAGE_PATH", str(tmp_path / "api-store"))
     # Rebuild the singleton after setting its storage value; production keeps one per process.
     films._services = films._ServicePool()
-    with TestClient(app) as client:
-        refused_live = client.post("/api/v1/films/", json={
-            "script": "This must not spend credits.", "backend": "live", "live": False, "max_clips": 0,
-        })
-        assert refused_live.status_code == 400
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id="test-film-owner", email="test-film-owner@example.test", is_active=True, is_superuser=True
+    )
+    try:
+        with TestClient(app) as client:
+            refused_live = client.post("/api/v1/films/", json={
+                "script": "This must not spend credits.", "backend": "live", "live": False, "max_clips": 0,
+            })
+            assert refused_live.status_code == 400
 
-        created = client.post("/api/v1/films/", json={
-            "script": "A courier crosses a moonlit bridge.", "target_seconds": 15,
-        })
-        assert created.status_code == 200
-        film_id = created.json()["film"]["id"]
-        latest = None
-        for _ in range(6):
-            latest = client.post(f"/api/v1/films/{film_id}/tick")
-            assert latest.status_code == 200
-            if latest.json()["film"]["status"] == "completed":
-                break
-        assert latest.json()["film"]["status"] == "completed"
-        readback = client.get(f"/api/v1/films/{film_id}")
-        assert readback.status_code == 200
-        assert Path(readback.json()["output_path"]).exists()
+            created = client.post("/api/v1/films/", json={
+                "script": "A courier crosses a moonlit bridge.", "target_seconds": 15,
+            })
+            assert created.status_code == 200
+            film_id = created.json()["film"]["id"]
+            latest = None
+            for _ in range(6):
+                latest = client.post(f"/api/v1/films/{film_id}/tick")
+                assert latest.status_code == 200
+                if latest.json()["film"]["status"] == "completed":
+                    break
+            assert latest.json()["film"]["status"] == "completed"
+            readback = client.get(f"/api/v1/films/{film_id}")
+            assert readback.status_code == 200
+            assert Path(readback.json()["output_path"]).exists()
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)

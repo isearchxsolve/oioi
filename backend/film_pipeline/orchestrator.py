@@ -54,6 +54,9 @@ class FilmRequest:
     #: Slate clips preserve timing but need explicit quality approval at finalization.
     allow_slates: bool = False
     slate_fraction_limit: float = 0.05
+    #: A user identifier scopes API idempotency so equal customer briefs never
+    #: replay or disclose the same durable film graph across tenants.
+    tenant_scope: Optional[str] = None
 
 
 class FilmOrchestrator:
@@ -197,7 +200,7 @@ class FilmOrchestrator:
         )
         request_key = request_key_for_film(
             script=request.script, target_seconds=target_seconds, aspect_ratio=request.aspect_ratio,
-            bible=stable_input_bible, seed=request.seed,
+            bible=stable_input_bible, seed=request.seed, tenant_scope=request.tenant_scope,
         )
         existing = self.store.get_film_by_request_key(request_key)
         if existing is not None and int(existing["logical_shots"]) > 0:

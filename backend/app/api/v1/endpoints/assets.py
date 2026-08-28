@@ -13,7 +13,7 @@ Two different kinds of asset live here, and the distinction matters:
   projects in projects.py. They do NOT survive a restart, which is a real limitation and is
   reported as such by `persistent: false` rather than hidden.
 """
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
@@ -24,6 +24,8 @@ import uuid
 from pathlib import Path
 
 from app.core.config import settings
+from app.api.v1.dependencies.auth import get_current_user
+from app.models.user import User
 
 router = APIRouter()
 
@@ -67,7 +69,7 @@ def _image_suffix(blob: bytes) -> Optional[str]:
 
 
 def remember_run_outputs(project_id: str, characters: List[Dict[str, Any]],
-                         scenes: List[Dict[str, Any]]) -> None:
+                         scenes: List[Dict[str, Any]], *, user_id: Optional[str] = None) -> None:
     """Record what a pipeline run invented so the Library can show it.
 
     Deduplicated by name/description so re-running the same idea does not pile up copies. Called
@@ -80,7 +82,7 @@ def remember_run_outputs(project_id: str, characters: List[Dict[str, Any]],
             continue
         _LIBRARY["characters"][key] = {
             "id": key, "name": c.get("name"), "description": c.get("description", ""),
-            "project_id": project_id, "saved_at": now,
+            "project_id": project_id, "owner_id": user_id, "saved_at": now,
         }
     for i, s in enumerate(scenes or []):
         desc = (s.get("description") or s.get("visual_prompt") or "").strip()
@@ -90,7 +92,7 @@ def remember_run_outputs(project_id: str, characters: List[Dict[str, Any]],
         _LIBRARY["scenes"][key] = {
             "id": key, "name": f"Scene {s.get('id', s.get('scene', i + 1))}",
             "description": desc, "duration": s.get("duration"),
-            "project_id": project_id, "saved_at": now,
+            "project_id": project_id, "owner_id": user_id, "saved_at": now,
         }
 
 
@@ -100,6 +102,10 @@ def _clips() -> List[Dict[str, Any]]:
     Walks the harvest tree (flow/, rtst/, ...) and the app's own media directory. The provider is
     taken from the containing directory name, which is how the router organises its output.
     """
+    # Local clip files predate tenant ownership. Do not expose their names or URLs
+    # to paid users until each file has durable ownership metadata.
+    if settings.CLOSED_SAAS_MODE:
+        return []
     found: List[Dict[str, Any]] = []
     roots = [(STORAGE_DIR, "local")]
     if settings.ENABLE_LEGACY_HARVEST_ASSETS:
@@ -127,21 +133,24 @@ def _clips() -> List[Dict[str, Any]]:
 
 
 @router.get("/")
-async def list_assets():
+async def list_assets(user: User = Depends(get_current_user)):
     """Everything the Library tab shows, in one call."""
     clips = _clips()
+    characters = [item for item in _LIBRARY["characters"].values() if item.get("owner_id") == user.id]
+    scenes = [item for item in _LIBRARY["scenes"].values() if item.get("owner_id") == user.id]
+    styles = [item for item in _LIBRARY["styles"].values() if item.get("owner_id") == user.id]
     return {
-        "characters": sorted(_LIBRARY["characters"].values(),
+        "characters": sorted(characters,
                              key=lambda a: a["saved_at"], reverse=True),
-        "scenes": sorted(_LIBRARY["scenes"].values(),
+        "scenes": sorted(scenes,
                          key=lambda a: a["saved_at"], reverse=True),
-        "styles": sorted(_LIBRARY["styles"].values(),
+        "styles": sorted(styles,
                          key=lambda a: a["saved_at"], reverse=True),
         "clips": clips,
         "counts": {
-            "characters": len(_LIBRARY["characters"]),
-            "scenes": len(_LIBRARY["scenes"]),
-            "styles": len(_LIBRARY["styles"]),
+            "characters": len(characters),
+            "scenes": len(scenes),
+            "styles": len(styles),
             "clips": len(clips),
         },
         # Honest about what is durable. Clips are files; the rest is process memory.
@@ -164,6 +173,7 @@ async def upload_character_reference(
     image: UploadFile = File(...),
     character_name: str = "character",
     kind: str = "portrait",
+    user: User = Depends(get_current_user),
 ):
     """Store a customer-provided sheet/portrait without calling an image provider.
 
@@ -196,6 +206,7 @@ async def upload_character_reference(
         "kind": kind,
         "bytes": len(blob),
         "sha256": digest,
+        "owner_id": user.id,
         "saved_at": time.time(),
         "persistent": True,
     }
@@ -209,24 +220,24 @@ async def upload_character_reference(
 
 
 @router.post("/styles")
-async def save_style(request: SaveStyleRequest):
+async def save_style(request: SaveStyleRequest, user: User = Depends(get_current_user)):
     """Pin a style to the Library so it can be reused across runs."""
     _LIBRARY["styles"][request.id] = {
         "id": request.id, "name": request.name, "category": request.category,
-        "promptSuffix": request.promptSuffix, "saved_at": time.time(),
+        "promptSuffix": request.promptSuffix, "owner_id": user.id, "saved_at": time.time(),
     }
     return _LIBRARY["styles"][request.id]
 
 
 @router.delete("/styles/{style_id}")
-async def unsave_style(style_id: str):
-    if style_id not in _LIBRARY["styles"]:
+async def unsave_style(style_id: str, user: User = Depends(get_current_user)):
+    if style_id not in _LIBRARY["styles"] or _LIBRARY["styles"][style_id].get("owner_id") != user.id:
         raise HTTPException(status_code=404, detail=f"style {style_id!r} is not in the library")
     return {"removed": _LIBRARY["styles"].pop(style_id)["id"]}
 
 
 @router.get("/clips/{provider}/{filename}")
-async def get_clip(provider: str, filename: str):
+async def get_clip(provider: str, filename: str, user: User = Depends(get_current_user)):
     """Stream one generated clip.
 
     Both path segments are validated against the enumerated set rather than joined onto
@@ -248,9 +259,12 @@ async def get_clip(provider: str, filename: str):
 
 
 @router.get("/character-references/{asset_id}", name="get_character_reference")
-async def get_character_reference(asset_id: str):
+async def get_character_reference(asset_id: str, user: User = Depends(get_current_user)):
     """Serve one generated-ID character reference from app-owned storage."""
     if len(asset_id) != 32 or any(ch not in "0123456789abcdef" for ch in asset_id):
+        raise HTTPException(status_code=404, detail="character reference not found")
+    record = _LIBRARY["characters"].get(asset_id)
+    if record is None or record.get("owner_id") != user.id:
         raise HTTPException(status_code=404, detail="character reference not found")
     matches = list(CHARACTER_REFERENCE_DIR.glob(f"{asset_id}.*"))
     if len(matches) != 1 or not matches[0].is_file():

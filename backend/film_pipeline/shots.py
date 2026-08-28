@@ -84,11 +84,12 @@ def job_key_for_shot(shot: ShotSpec, *, canonical_index: int) -> str:
 
 
 def request_key_for_film(
-    *, script: str, target_seconds: int, aspect_ratio: str, bible: Dict[str, Any], seed: Optional[int]
+    *, script: str, target_seconds: int, aspect_ratio: str, bible: Dict[str, Any], seed: Optional[int],
+    tenant_scope: Optional[str] = None,
 ) -> str:
     return stable_hash({
         "script": script.strip(), "targetSeconds": int(target_seconds), "aspectRatio": aspect_ratio,
-        "bible": bible, "seed": seed,
+        "bible": bible, "seed": seed, "tenantScope": tenant_scope or "",
     })
 
 

@@ -5,7 +5,6 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/
 class ApiClient {
   private client: AxiosInstance
   private accessToken: string | null = null
-  private refreshToken: string | null = null
 
   constructor() {
     this.client = axios.create({
@@ -31,22 +30,10 @@ class ApiClient {
       async (error: AxiosError) => {
         const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean }
         
-        if (error.response?.status === 401 && !originalRequest._retry && this.refreshToken) {
-          originalRequest._retry = true
-          
-          try {
-            const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
-              refresh_token: this.refreshToken,
-            })
-            
-            this.setTokens(response.data.access_token, response.data.refresh_token)
-            originalRequest.headers.Authorization = `Bearer ${this.accessToken}`
-            
-            return this.client(originalRequest)
-          } catch (refreshError) {
-            this.clearTokens()
-            window.location.href = '/login'
-            return Promise.reject(refreshError)
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          this.clearTokens()
+          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+            window.location.assign('/login')
           }
         }
         
@@ -57,25 +44,20 @@ class ApiClient {
     // Load tokens from localStorage on init
     if (typeof window !== 'undefined') {
       this.accessToken = localStorage.getItem('access_token')
-      this.refreshToken = localStorage.getItem('refresh_token')
     }
   }
 
-  setTokens(accessToken: string, refreshToken: string) {
+  setTokens(accessToken: string) {
     this.accessToken = accessToken
-    this.refreshToken = refreshToken
     if (typeof window !== 'undefined') {
       localStorage.setItem('access_token', accessToken)
-      localStorage.setItem('refresh_token', refreshToken)
     }
   }
 
   clearTokens() {
     this.accessToken = null
-    this.refreshToken = null
     if (typeof window !== 'undefined') {
       localStorage.removeItem('access_token')
-      localStorage.removeItem('refresh_token')
     }
   }
 
@@ -90,13 +72,7 @@ class ApiClient {
   // Auth endpoints
   async login(email: string, password: string) {
     const response = await this.client.post('/auth/login', { email, password })
-    this.setTokens(response.data.access_token, response.data.refresh_token)
-    return response.data
-  }
-
-  async register(email: string, password: string, fullName: string) {
-    const response = await this.client.post('/auth/register', { email, password, full_name: fullName })
-    this.setTokens(response.data.access_token, response.data.refresh_token)
+    this.setTokens(response.data.access_token)
     return response.data
   }
 
@@ -113,12 +89,6 @@ class ApiClient {
     return response.data
   }
 
-  async refreshAccessToken() {
-    if (!this.refreshToken) throw new Error('No refresh token')
-    const response = await this.client.post('/auth/refresh', { refresh_token: this.refreshToken })
-    this.setTokens(response.data.access_token, response.data.refresh_token)
-    return response.data
-  }
 
   // NIM endpoints
   async listModels() {
@@ -289,12 +259,35 @@ class ApiClient {
 
   // User endpoints
   async getUserProfile() {
-    const response = await this.client.get('/users/me')
+    const response = await this.client.get('/auth/me')
     return response.data
   }
 
-  async updateUserProfile(data: { full_name?: string; avatar_url?: string }) {
-    const response = await this.client.patch('/users/me', data)
+  async updateUserProfile(data: { email?: string; name?: string; avatar_url?: string }) {
+    const response = await this.client.patch('/auth/me', data)
+    return response.data
+  }
+
+  async changeMyPassword(current_password: string, new_password: string) {
+    const response = await this.client.post('/auth/me/password', { current_password, new_password })
+    this.clearTokens()
+    return response.data
+  }
+
+  async listManagedUsers() {
+    const response = await this.client.get('/auth/users')
+    return response.data
+  }
+
+  async createManagedUser(data: { email: string; password: string; name?: string; avatar_url?: string }) {
+    const response = await this.client.post('/auth/users', data)
+    return response.data
+  }
+
+  async updateManagedUser(userId: string, data: {
+    email?: string; password?: string; name?: string; avatar_url?: string; is_active?: boolean
+  }) {
+    const response = await this.client.patch(`/auth/users/${userId}`, data)
     return response.data
   }
 

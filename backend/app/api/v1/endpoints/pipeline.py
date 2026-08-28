@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
@@ -7,6 +7,8 @@ from app.core.config import settings
 from app.services.provider_service import get_provider_registry
 from app.api.v1.endpoints.assets import remember_run_outputs
 from app.api.v1.endpoints.legacy import require_legacy_demo_mode
+from app.api.v1.dependencies.auth import get_current_user
+from app.models.user import User
 
 router = APIRouter()
 
@@ -129,7 +131,7 @@ def _animate_stages(anim_state: Dict[str, Any]) -> tuple:
 
 
 @router.post("/{project_id}/pipeline/run")
-async def run_pipeline_full(project_id: str, request: PipelineRunRequest):
+async def run_pipeline_full(project_id: str, request: PipelineRunRequest, user: User = Depends(get_current_user)):
     """Run all 7 agents in one call, Scriptwriter through Director.
 
     This is the unattended path: the two-call flow above pauses between Scene Designer and
@@ -168,7 +170,7 @@ async def run_pipeline_full(project_id: str, request: PipelineRunRequest):
     # failure must not turn a finished 7-agent run into a 500 for the caller.
     try:
         remember_run_outputs(project_id, script_state.get("characters", []) or [],
-                             script_state.get("scenes", []) or [])
+                             script_state.get("scenes", []) or [], user_id=user.id)
     except Exception:
         pass
 
@@ -197,7 +199,7 @@ async def run_pipeline_full(project_id: str, request: PipelineRunRequest):
 
 
 @router.post("/{project_id}/pipeline/scriptwriter")
-async def run_pipeline_scriptwriter(project_id: str, request: PipelineRunRequest):
+async def run_pipeline_scriptwriter(project_id: str, request: PipelineRunRequest, user: User = Depends(get_current_user)):
     """Run Agents 1-4 (Scriptwriter to Scene Designer) and pause for approval."""
     registry = await get_provider_registry()
     pipeline = create_animation_pipeline(registry, model=request.model)
@@ -210,7 +212,7 @@ async def run_pipeline_scriptwriter(project_id: str, request: PipelineRunRequest
 
     try:
         remember_run_outputs(project_id, results.get("characters", []) or [],
-                             results.get("scenes", []) or [])
+                             results.get("scenes", []) or [], user_id=user.id)
     except Exception:
         pass
 
@@ -233,7 +235,7 @@ async def run_pipeline_scriptwriter(project_id: str, request: PipelineRunRequest
     }
 
 @router.post("/{project_id}/pipeline/animate")
-async def run_pipeline_animate(project_id: str, request: PipelineAnimateRequest):
+async def run_pipeline_animate(project_id: str, request: PipelineAnimateRequest, user: User = Depends(get_current_user)):
     """Run Agents 5-7 (Animator to Director) after human approval."""
     require_legacy_demo_mode()
     pipeline = active_pipelines.get(project_id)

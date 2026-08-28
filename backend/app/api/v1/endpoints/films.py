@@ -12,7 +12,7 @@ from typing import Any, Dict, Literal, Optional
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from film_pipeline.assembly import HttpClipMaterializer, SyntheticClipMaterializer
@@ -21,6 +21,8 @@ from film_pipeline.crew import CrewHandoffError, admit_approved_crew_film
 from film_pipeline.mock import DeterministicMockChatClient, MockVideoBackend
 from film_pipeline.orchestrator import FilmOrchestrator, FilmRequest
 from film_pipeline.store import FilmJobStore
+from app.api.v1.dependencies.auth import get_current_user
+from app.models.user import User
 
 router = APIRouter()
 
@@ -116,8 +118,18 @@ class _ServicePool:
 _services = _ServicePool()
 
 
+def _ensure_film_access(film_id: str, user: User) -> None:
+    owner_id = _services.store.film_owner(film_id)
+    if owner_id is None:
+        # Pre-SaaS local artifacts have no tenant owner and are intentionally not
+        # surfaced to customers. The owner can inspect/migrate them out of band.
+        raise HTTPException(status_code=404, detail="film not found")
+    if owner_id != user.id and not user.is_superuser:
+        raise HTTPException(status_code=404, detail="film not found")
+
+
 @router.post("/")
-async def create_film(request: FilmCreateRequest):
+async def create_film(request: FilmCreateRequest, user: User = Depends(get_current_user)):
     if request.backend == "live" and (not request.live or request.max_clips <= 0):
         raise HTTPException(
             status_code=400,
@@ -125,7 +137,7 @@ async def create_film(request: FilmCreateRequest):
         )
     orchestrator = _services.get(request.backend, max_clips=request.max_clips)
     try:
-        return await orchestrator.request_film(FilmRequest(
+        result = await orchestrator.request_film(FilmRequest(
             script=request.script, target_seconds=request.target_seconds, aspect_ratio=request.aspect_ratio,
             style=request.style, image_refs=request.image_refs, character_refs=request.character_refs,
             seed=request.seed, bible=request.bible,
@@ -133,7 +145,12 @@ async def create_film(request: FilmCreateRequest):
             max_clips=request.max_clips if request.backend == "live" else None,
             allow_slates=request.allow_slates,
             slate_fraction_limit=request.slate_fraction_limit,
+            tenant_scope=user.id,
         ))
+        film_id = str((result.get("film") or {}).get("id") or "")
+        if not film_id or not _services.store.claim_film_owner(film_id, user.id):
+            raise HTTPException(status_code=409, detail="film belongs to another account")
+        return result
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"film planning/admission failed: {type(exc).__name__}: {exc}") from exc
     finally:
@@ -142,19 +159,24 @@ async def create_film(request: FilmCreateRequest):
 
 
 @router.post("/crew-admissions")
-async def admit_crew_film(request: CrewFilmAdmissionRequest):
+async def admit_crew_film(request: CrewFilmAdmissionRequest, user: User = Depends(get_current_user)):
     """Persist an approved crew package without contacting a generation provider."""
     try:
         image_refs = _approved_https_refs(request.image_refs)
         character_refs = _approved_https_refs(request.character_refs)
-        return await admit_approved_crew_film(
+        result = await admit_approved_crew_film(
             _services.get("mock"),
             request.crew_outputs,
             target_seconds=request.target_seconds,
             aspect_ratio=request.aspect_ratio,
             image_refs=image_refs,
             character_refs=character_refs,
+            tenant_scope=user.id,
         )
+        film_id = str(((result.get("admission") or {}).get("film") or {}).get("id") or "")
+        if not film_id or not _services.store.claim_film_owner(film_id, user.id):
+            raise HTTPException(status_code=409, detail="film belongs to another account")
+        return result
     except (CrewHandoffError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -162,8 +184,9 @@ async def admit_crew_film(request: CrewFilmAdmissionRequest):
 
 
 @router.get("/{film_id}")
-async def get_film(film_id: str):
+async def get_film(film_id: str, user: User = Depends(get_current_user)):
     try:
+        _ensure_film_access(film_id, user)
         return _services.store.summary(film_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -175,11 +198,13 @@ async def tick_film(
     backend: Literal["mock", "live"] = "mock",
     live: bool = False,
     max_clips: int = 0,
+    user: User = Depends(get_current_user),
 ):
     if backend == "live" and (not live or max_clips <= 0):
         raise HTTPException(status_code=400, detail="live scheduling requires live=true and a positive max_clips safety cap")
     orchestrator = _services.get(backend, max_clips=max_clips)
     try:
+        _ensure_film_access(film_id, user)
         return await orchestrator.tick(film_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

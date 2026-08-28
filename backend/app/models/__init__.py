@@ -16,6 +16,7 @@ from app.models.asset import Asset
 from app.models.style import Style
 from app.models.model import Model
 from app.models.agent_execution import AgentExecution
+from app.models.auth_session import AuthSession
 
 __all__ = [
     "User",
@@ -24,4 +25,5 @@ __all__ = [
     "Style",
     "Model",
     "AgentExecution",
+    "AuthSession",
 ]

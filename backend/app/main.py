@@ -10,7 +10,8 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.core.config import settings
-from app.core import db
+from app.core import database as db
+from app.services.auth_service import OwnerBootstrapError, bootstrap_owner
 from app.services.provider_service import init_registry, shutdown_registry, get_provider_registry
 from app.api.v1.api import api_router
 
@@ -18,6 +19,16 @@ from app.api.v1.api import api_router
 async def lifespan(app: FastAPI):
     # Startup: ensure schema exists and providers are registered.
     await db.init_db()
+    _, session_maker = db._init_engine()
+    async with session_maker() as session:
+        try:
+            await bootstrap_owner(session)
+        except OwnerBootstrapError:
+            # An owner-less production server must never expose protected workspaces.
+            # In development the operator may configure the owner later; login remains
+            # impossible until one exists.
+            if settings.APP_ENV.lower() in {"production", "prod"}:
+                raise
     os.makedirs(settings.STORAGE_PATH, exist_ok=True)
     await init_registry()
     yield

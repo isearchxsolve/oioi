@@ -10,6 +10,7 @@ class Base(DeclarativeBase):
 # Engine is created lazily so importing this module does not require a live DB.
 engine = None
 async_session_maker = None
+_schema_initialized = False
 
 
 def _init_engine():
@@ -27,12 +28,23 @@ def _init_engine():
 
 
 async def init_db():
+    global _schema_initialized
+    # Import the model package before metadata creation.  Several legacy routes
+    # used only in-memory state, so no model import previously happened during
+    # startup and a fresh deployment could start without the users table.
+    import app.models  # noqa: F401
+
     _, session_maker = _init_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    _schema_initialized = True
 
 
 async def get_session() -> AsyncSession:
+    # TestClient instances used outside a lifespan context and small scripts still
+    # receive a usable database. Production performs this during lifespan startup.
+    if not _schema_initialized:
+        await init_db()
     _, session_maker = _init_engine()
     async with session_maker() as session:
         yield session

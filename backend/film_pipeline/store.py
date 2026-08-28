@@ -144,6 +144,12 @@ class FilmJobStore:
                     created_at REAL NOT NULL,
                     PRIMARY KEY (film_id, segment_index)
                 );
+                CREATE TABLE IF NOT EXISTS film_owners (
+                    film_id TEXT PRIMARY KEY REFERENCES films(id) ON DELETE CASCADE,
+                    user_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_film_owners_user ON film_owners(user_id);
                 """
             )
             # The project is intentionally migration-light for the local durable SQLite
@@ -229,6 +235,24 @@ class FilmJobStore:
         with self._lock, self._connection() as conn:
             row = conn.execute("SELECT * FROM films WHERE id=?", (film_id,)).fetchone()
         return self._film(row) if row else None
+
+    def claim_film_owner(self, film_id: str, user_id: str) -> bool:
+        """Atomically attach a newly admitted SaaS film to exactly one account."""
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO film_owners (film_id,user_id,created_at) VALUES (?,?,?) "
+                "ON CONFLICT(film_id) DO NOTHING",
+                (film_id, user_id, _now()),
+            )
+            row = conn.execute("SELECT user_id FROM film_owners WHERE film_id=?", (film_id,)).fetchone()
+            conn.commit()
+        return bool(row and str(row["user_id"]) == user_id)
+
+    def film_owner(self, film_id: str) -> Optional[str]:
+        with self._lock, self._connection() as conn:
+            row = conn.execute("SELECT user_id FROM film_owners WHERE film_id=?", (film_id,)).fetchone()
+        return str(row["user_id"]) if row else None
 
     def set_film_status(self, film_id: str, status: str, *, error: Optional[str] = None, output_path: Optional[str] = None) -> None:
         with self._lock, self._connection() as conn:

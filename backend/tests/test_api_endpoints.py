@@ -1,6 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from app.api.v1.dependencies.auth import get_current_user
+from app.models.user import User
 from providers.registry import get_registry, reset_registry
 from providers.base import (
     AIProviderAdapter,
@@ -175,6 +177,16 @@ def setup_mock_registry():
     registry.register("mock_chat", MockChatAdapter(), priority=-1, capabilities=("chat", "image", "video", "audio"))
     yield
     reset_registry()
+
+
+@pytest.fixture(autouse=True)
+def authenticated_api_principal():
+    """Legacy endpoint contract tests exercise behavior after authentication."""
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id="test-api-owner", email="test-api-owner@example.test", is_active=True, is_superuser=True
+    )
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 def test_health_endpoint():

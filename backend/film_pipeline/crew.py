@@ -8,7 +8,7 @@ reference URLs remain caller-owned inputs relayed by the Film Pipeline.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .orchestrator import FilmOrchestrator, FilmRequest
@@ -210,11 +210,13 @@ def build_approved_crew_handoff(
 async def admit_approved_crew_film(
     orchestrator: FilmOrchestrator,
     crew_outputs: Mapping[str, Any],
+    tenant_scope: Optional[str] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Persist the approved crew package and its planned shots in ``FilmJobStore``."""
     handoff = build_approved_crew_handoff(crew_outputs, **kwargs)
-    admission = await orchestrator.request_film(handoff.request)
+    request = replace(handoff.request, tenant_scope=tenant_scope) if tenant_scope else handoff.request
+    admission = await orchestrator.request_film(request)
     # ``request_film`` intentionally returns a compact form on an idempotent replay.
     # The crew endpoint has one stable admission contract, so expose its acceptance
     # truth on both first admission and replay rather than forcing an API caller to

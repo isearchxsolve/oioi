@@ -1,4 +1,5 @@
-import { Routes, Route } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Navigate, Routes, Route } from 'react-router-dom'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { Header } from '@/components/layout/Header'
 import { Dashboard } from '@/pages/Dashboard'
@@ -7,6 +8,8 @@ import { VideoGenerator } from '@/pages/VideoGenerator'
 import { Projects } from '@/pages/Projects'
 import { Settings } from '@/pages/Settings'
 import { useUIStore } from '@/stores/uiStore'
+import { api } from '@/lib/api'
+import { Login } from '@/pages/Login'
 
 function Layout() {
   const { sidebarOpen, toggleSidebar } = useUIStore()
@@ -34,8 +37,29 @@ function Layout() {
   )
 }
 
+function RequireAuthentication({ children }: { children: React.ReactNode }) {
+  const [checking, setChecking] = useState(true)
+  const [allowed, setAllowed] = useState(false)
+
+  useEffect(() => {
+    if (!api.isAuthenticated()) {
+      setChecking(false)
+      return
+    }
+    api.getCurrentUser().then(() => setAllowed(true)).catch(() => api.clearTokens()).finally(() => setChecking(false))
+  }, [])
+
+  if (checking) return <main className="min-h-screen bg-dark-950 p-8 text-dark-300">Checking studio access…</main>
+  return allowed ? <>{children}</> : <Navigate to="/login" replace />
+}
+
 function App() {
-  return <Layout />
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/*" element={<RequireAuthentication><Layout /></RequireAuthentication>} />
+    </Routes>
+  )
 }
 
 export default App
