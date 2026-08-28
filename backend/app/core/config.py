@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     AUTH_SESSION_TTL_HOURS: int = int(os.getenv("OIOI_AUTH_SESSION_TTL_HOURS", "168"))
     # Final deliverables are compressed then retained as database BLOBs. Intermediate
     # clips remain short-lived FFmpeg work files and are removed after commit.
-    FILM_ARTIFACT_QUOTA_BYTES: int = int(os.getenv("FILM_ARTIFACT_QUOTA_BYTES", str(10 * 1024 * 1024 * 1024)))
+    FILM_ARTIFACT_QUOTA_BYTES: int = int(os.getenv("FILM_ARTIFACT_QUOTA_BYTES", str(6 * 1024 * 1024 * 1024)))
     
     # CORS
     # The UI runs on :3011 (see .claude/launch.json and the dev script), which was NOT in this list

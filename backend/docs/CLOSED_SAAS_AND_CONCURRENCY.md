@@ -61,7 +61,7 @@ for source clips, segments, audio, and assembly; after a final MP4 succeeds, Oii
 once to a delivery profile (H.264 CRF 28, AAC 96k, fast-start), retains that one result as a
 database BLOB with SHA-256 metadata, then removes only that film's temporary work directory.
 
-`FILM_ARTIFACT_QUOTA_BYTES=10737418240` sets an exact 10 GiB catalog limit. The storage transaction
+`FILM_ARTIFACT_QUOTA_BYTES=6442450944` sets OiiOii's 6 GiB allocation within the combined 10 GiB catalog limit. The storage transaction
 rejects an artifact that would exceed the quota and never deletes a valid local final if compression
 or database retention fails. This is deliberately not a BLOB for every intermediate clip: doing
 that would waste quota and inflate database write amplification. The admin history exposes exact
@@ -78,7 +78,7 @@ OIOI_CLOSED_SAAS_MODE=true
 OIOI_OWNER_EMAIL=your-private-owner-email
 OIOI_OWNER_INITIAL_PASSWORD=a-unique-password-of-at-least-12-characters
 OIOI_AUTH_SESSION_TTL_HOURS=168
-FILM_ARTIFACT_QUOTA_BYTES=10737418240
+FILM_ARTIFACT_QUOTA_BYTES=6442450944
 ```
 
 Do not commit the real `.env`. After the first successful owner login, remove

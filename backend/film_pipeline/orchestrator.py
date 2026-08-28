@@ -108,7 +108,9 @@ class FilmOrchestrator:
         self.execution_backend = execution_backend
         self.live_max_clips = int(max_clips or 0)
         self.artifact_quota_bytes = max(
-            1, int(artifact_quota_bytes or os.getenv("FILM_ARTIFACT_QUOTA_BYTES", str(10 * 1024 * 1024 * 1024)))
+            # Platform allocation is intentionally below the 10 GiB combined
+            # consumer cap; EmergentSH receives its own bounded allocation.
+            1, int(artifact_quota_bytes or os.getenv("FILM_ARTIFACT_QUOTA_BYTES", str(6 * 1024 * 1024 * 1024)))
         )
         if self.execution_backend == "live" and (not live or self.live_max_clips <= 0):
             raise ValueError("live video requires explicit live=True and a positive max_clips safety cap")
