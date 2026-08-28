@@ -71,6 +71,11 @@ def test_profiles_passwords_and_projects_are_tenant_scoped(client: TestClient) -
     assert customer_project.status_code == 200
     assert client.get(f"/api/v1/projects/{owner_project['id']}", headers=customer_headers).status_code == 404
     assert [item["title"] for item in client.get("/api/v1/projects/", headers=customer_headers).json()] == ["Customer film"]
+    history = client.get(f"/api/v1/auth/users/{customer_id}/history", headers=owner_headers)
+    assert history.status_code == 200
+    assert history.json()["user"]["id"] == customer_id
+    assert [item["name"] for item in history.json()["projects"]] == ["Customer film"]
+    assert client.get(f"/api/v1/auth/users/{customer_id}/history", headers=customer_headers).status_code == 403
 
     profile = client.patch(
         "/api/v1/auth/me", json={"email": "customer.one@example.test", "name": "Customer One"}, headers=customer_headers,

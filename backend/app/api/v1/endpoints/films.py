@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from film_pipeline.assembly import HttpClipMaterializer, SyntheticClipMaterializer
@@ -29,7 +30,7 @@ router = APIRouter()
 
 class FilmCreateRequest(BaseModel):
     script: str = Field(min_length=1)
-    target_seconds: int = Field(default=10_800, ge=5)
+    target_seconds: int = Field(default=180, ge=5)
     aspect_ratio: str = "16:9"
     style: str = "cinematic"
     image_refs: list[str] = Field(default_factory=list)
@@ -105,12 +106,14 @@ class _ServicePool:
         # of the authorization to spend and must not leak from an earlier request.
         return FilmOrchestrator(
             store=self.store,
-            chat=ChatPoolClient(os.getenv("FILM_PIPELINE_CHAT_BASE_URL", "http://127.0.0.1:20130")),
+            chat=ChatPoolClient(os.getenv("FILM_PIPELINE_CONSUMER_BASE_URL", "http://127.0.0.1:8190")),
             video=VideoRouterClient(
-                os.getenv("FILM_PIPELINE_VIDEO_BASE_URL", "http://127.0.0.1:8189"),
+                os.getenv("FILM_PIPELINE_CONSUMER_BASE_URL", "http://127.0.0.1:8190"),
                 mode="live", live=True, max_clips=max_clips,
+                video_model=os.getenv("FILM_PIPELINE_VIDEO_MODEL", "video/auto"),
             ),
             artifact_root=self.root / "artifacts", materializer=HttpClipMaterializer(),
+            per_provider_cap=4, per_seat_cap=1, submit_concurrency=24,
             execution_backend="live", live=True, max_clips=max_clips,
         )
 
@@ -190,6 +193,27 @@ async def get_film(film_id: str, user: User = Depends(get_current_user)):
         return _services.store.summary(film_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{film_id}/artifact")
+async def get_film_artifact(film_id: str, user: User = Depends(get_current_user)):
+    """Return the owner-authorized compressed final stored in the artifact database."""
+    _ensure_film_access(film_id, user)
+    artifact = _services.store.artifact_for_film(film_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="archived film artifact not found")
+    payload = _services.store.artifact_payload(str(artifact["id"]))
+    if payload is None:
+        raise HTTPException(status_code=404, detail="archived film artifact not found")
+    metadata, blob = payload
+    return Response(
+        content=blob, media_type=str(metadata["content_type"]),
+        headers={
+            "Content-Length": str(metadata["stored_bytes"]),
+            "ETag": str(metadata["sha256"]),
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
 
 
 @router.post("/{film_id}/tick")

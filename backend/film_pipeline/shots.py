@@ -307,7 +307,7 @@ class ShotListPlanner:
             "keys characters (object of stable visual descriptions), wardrobe, locations, lighting, "
             "style, and imageRefs (array). Do not add prose outside JSON.\n\nSCREENPLAY:\n" + script
         )
-        reply = await self.chat.message(prompt, max_tokens=1024, model="pool/auto")
+        reply = await self.chat.message(prompt, max_tokens=1024, model="session-pool/auto")
         try:
             data = _extract_json(reply.text)
         except ValueError as exc:
@@ -370,7 +370,7 @@ class ShotListPlanner:
             # One complete six-shot scene is the smallest scene-coherent planner
             # transaction. It avoids both the 39/40 response truncation and the
             # >45-second timeout observed for larger structured replies.
-            reply = await self.chat.message(request, max_tokens=max(1024, count * 150), model="pool/auto")
+            reply = await self.chat.message(request, max_tokens=max(1024, count * 150), model="session-pool/auto")
             provider = reply.provider
             try:
                 raw = _extract_json(reply.text)

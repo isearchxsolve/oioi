@@ -15,6 +15,8 @@ from app.api.v1.dependencies.auth import get_current_user, require_admin
 from app.core.database import get_session
 from app.core.security import hash_password, verify_password
 from app.models.user import User
+from app.models.project import Project
+from app.models.asset import Asset
 from app.services.auth_service import (
     create_session,
     normalize_email,
@@ -73,6 +75,42 @@ def _user_payload(user: User) -> dict:
 def _bearer_from_request(request: Request) -> str:
     scheme, _, token = request.headers.get("Authorization", "").partition(" ")
     return token if scheme.lower() == "bearer" else ""
+
+
+async def _customer_history(session: AsyncSession, user: User) -> dict:
+    """Operator-safe complete customer inventory; binary media is never inlined."""
+    projects = list((await session.scalars(
+        select(Project).where(Project.user_id == user.id).order_by(Project.created_at.desc())
+    )).all())
+    project_ids = [project.id for project in projects]
+    assets = []
+    if project_ids:
+        assets = list((await session.scalars(
+            select(Asset).where(Asset.project_id.in_(project_ids)).order_by(Asset.created_at.desc())
+        )).all())
+    # Import lazily to avoid API-router module initialisation cycles.
+    from app.api.v1.endpoints.films import _services
+
+    films = _services.store.films_for_owner(user.id)
+    return {
+        "user": _user_payload(user),
+        "projects": [
+            {"id": project.id, "name": project.name, "status": project.status, "created_at": project.created_at,
+             "updated_at": project.updated_at}
+            for project in projects
+        ],
+        "assets": [
+            {"id": asset.id, "project_id": asset.project_id, "type": asset.type, "name": asset.name,
+             "url": asset.url, "duration": asset.duration, "created_at": asset.created_at,
+             "metadata": asset.metadata_json}
+            for asset in assets
+        ],
+        "films": films,
+        "storage": {
+            "artifact_bytes": sum(int((film.get("artifact") or {}).get("stored_bytes") or 0) for film in films),
+            "artifact_count": sum(1 for film in films if film.get("artifact")),
+        },
+    }
 
 
 @router.get("/bootstrap-status")
@@ -172,6 +210,27 @@ async def list_users(
 ):
     users = list((await session.scalars(select(User).order_by(User.created_at.desc()))).all())
     return {"users": [_user_payload(user) for user in users]}
+
+
+@router.get("/users/{user_id}/history")
+async def get_customer_history(
+    user_id: str,
+    _: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    return await _customer_history(session, user)
+
+
+@router.get("/history")
+async def get_all_customer_history(
+    _: User = Depends(require_admin), session: AsyncSession = Depends(get_session)
+):
+    users = list((await session.scalars(select(User).order_by(User.created_at.desc()))).all())
+    histories = [await _customer_history(session, user) for user in users]
+    return {"users": histories}
 
 
 @router.post("/users", status_code=status.HTTP_201_CREATED)

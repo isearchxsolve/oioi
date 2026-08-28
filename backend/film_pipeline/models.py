@@ -12,6 +12,8 @@ VideoStatus = Literal["queued", "running", "succeeded", "failed"]
 class ChatReply:
     text: str
     provider: Optional[str] = None
+    session: Optional[str] = None
+    tenant: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,15 @@ class VideoSubmission:
     estimated_seconds: int
     credits_reserved: float
     idempotent_replay: bool = False
+    session: Optional[str] = None
+    tenant: Optional[str] = None
+    #: Some consumer routes return a completed delivery URL inline instead of an
+    #: asynchronous job contract. Persist that completion immediately; do not keep
+    #: its only receipt in a process-local client map.
+    status: VideoStatus = "queued"
+    url: Optional[str] = None
+    error: Optional[str] = None
+    credits_spent: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +72,15 @@ class VideoNoCapacity(VideoRouterError):
 
 class VideoTransientError(VideoRouterError):
     pass
+
+
+class VideoSubmissionUnknown(VideoRouterError):
+    """A POST may have reached the router, but no receipt was received.
+
+    The consumer contract has no durable job lookup endpoint, so automatic replay
+    could buy a duplicate clip. The scheduler quarantines this state for an
+    operator/provider reconciliation rather than pretending it is retryable.
+    """
 
 
 class VideoWallError(VideoRouterError):

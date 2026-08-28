@@ -291,6 +291,11 @@ class ApiClient {
     return response.data
   }
 
+  async getManagedUserHistory(userId: string) {
+    const response = await this.client.get(`/auth/users/${userId}/history`)
+    return response.data
+  }
+
   async getUserUsage() {
     const response = await this.client.get('/users/me/usage')
     return response.data

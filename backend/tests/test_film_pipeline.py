@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -14,11 +15,11 @@ from film_pipeline.assembly import (
     SyntheticClipMaterializer,
     SyntheticFallbackClipMaterializer,
 )
-from film_pipeline.clients import VideoNoCapacity, VideoRouterClient
+from film_pipeline.clients import ChatPoolClient, VideoNoCapacity, VideoRouterClient
 from film_pipeline.crew import CrewHandoffError, admit_approved_crew_film, build_approved_crew_handoff
 from film_pipeline.mock import DeterministicMockChatClient, MockSeat, MockVideoBackend, MockVideoConfig
 from film_pipeline.orchestrator import FilmOrchestrator, FilmRequest
-from film_pipeline.models import ChatReply, ShotSpec
+from film_pipeline.models import ChatReply, ShotSpec, VideoSubmissionUnknown
 from film_pipeline.shots import ShotListPlanner, _extract_json, deduplicate_shots, request_key_for_film
 from film_pipeline.store import FilmJobStore
 from studio_pipeline import media
@@ -194,6 +195,83 @@ async def test_mock_contract_idempotency_and_capacity_exhaustion() -> None:
             job_key="capacity-job", prompt="another shot", duration_seconds=5,
             image_refs=[], aspect_ratio="16:9", seed=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_consumer_v1_contract_preserves_provenance_and_supports_a_pinned_video_route() -> None:
+    """The production adapter speaks only the documented :8190 OpenAI-shaped API."""
+    received: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [
+                {"id": "session-pool/auto"},
+                {"id": "video/auto"},
+                {"id": "video/labs.google/auto"},
+                {"id": "video/labs.google/auto"},
+            ]})
+        if request.method == "POST" and request.url.path == "/v1/chat/completions":
+            body = json.loads(request.content)
+            received.append(body)
+            if body["model"] == "session-pool/auto":
+                return httpx.Response(200, json={
+                    "provider": "api.1min.ai", "session": "session_1min_ai", "tenant": "local",
+                    "choices": [{"message": {"content": "{\"shots\": []}"}}],
+                })
+            assert body["model"] == "video/labs.google/auto"
+            assert body["video"]["job_key"] == "consumer-video-job"
+            return httpx.Response(200, json={
+                "id": "chatcmpl-video", "provider": "labs.google", "session": "seat-12", "tenant": "local",
+                "choices": [{"message": {"content": json.dumps({
+                    "jobId": "consumer-video-job", "status": "succeeded",
+                    "url": "https://video.example/consumer-video-job.mp4",
+                })}}],
+            })
+        return httpx.Response(404, json={"detail": "unexpected route"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:8190"
+    ) as http:
+        chat = ChatPoolClient(client=http)
+        reply = await chat.message("return strict JSON")
+        assert reply.text == '{"shots": []}'
+        assert (reply.provider, reply.session, reply.tenant) == ("api.1min.ai", "session_1min_ai", "local")
+
+        video = VideoRouterClient(
+            client=http, mode="live", live=True, max_clips=1, video_model="video/labs.google/auto",
+        )
+        capacity = await video.capacity()
+        assert capacity.total_clips_available == 2
+        submitted = await video.submit(
+            job_key="consumer-video-job", prompt="a sustained camera dolly through rain", duration_seconds=5,
+            image_refs=["https://assets.example/reference.jpg"], aspect_ratio="16:9", seed=7,
+        )
+        assert (submitted.provider, submitted.session, submitted.tenant) == ("labs.google", "seat-12", "local")
+        assert (submitted.status, submitted.url) == ("succeeded", "https://video.example/consumer-video-job.mp4")
+        job = await video.get_job(submitted.job_id)
+        assert job.status == "succeeded"
+        assert job.url == "https://video.example/consumer-video-job.mp4"
+
+    assert [item["model"] for item in received] == ["session-pool/auto", "video/labs.google/auto"]
+
+
+@pytest.mark.asyncio
+async def test_consumer_video_timeout_is_marked_ambiguous_not_safe_to_repost() -> None:
+    """The new consumer API has no job lookup, so a lost POST receipt cannot be replayed."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            raise httpx.ReadTimeout("router did not return a receipt", request=request)
+        return httpx.Response(200, json={"data": [{"id": "video/labs.google/auto"}]})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:8190"
+    ) as http:
+        video = VideoRouterClient(client=http, mode="live", live=True, max_clips=1)
+        with pytest.raises(VideoSubmissionUnknown, match="receipt missing"):
+            await video.submit(
+                job_key="unknown-receipt", prompt="five-second cinematic test", duration_seconds=5,
+                image_refs=[], aspect_ratio="16:9", seed=None,
+            )
 
 
 @pytest.mark.asyncio
@@ -732,6 +810,10 @@ def test_film_api_mock_e2e_and_live_safety_gate(tmp_path: Path, monkeypatch: pyt
             assert latest.json()["film"]["status"] == "completed"
             readback = client.get(f"/api/v1/films/{film_id}")
             assert readback.status_code == 200
-            assert Path(readback.json()["output_path"]).exists()
+            assert readback.json()["output_path"].startswith("db://film-artifacts/")
+            artifact = client.get(f"/api/v1/films/{film_id}/artifact")
+            assert artifact.status_code == 200
+            assert artifact.headers["content-type"].startswith("video/mp4")
+            assert len(artifact.content) > 1024
     finally:
         app.dependency_overrides.pop(get_current_user, None)

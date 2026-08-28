@@ -181,7 +181,7 @@ class DeterministicMockChatClient:
     async def aclose(self) -> None:
         return None
 
-    async def message(self, content: str, *, max_tokens: int = 1024, model: str = "pool/auto") -> ChatReply:
+    async def message(self, content: str, *, max_tokens: int = 1024, model: str = "session-pool/auto") -> ChatReply:
         if "continuity bible" in content.lower():
             return ChatReply(text=json.dumps({
                 "characters": {"lead": "consistent protagonist"}, "wardrobe": "unchanged",
@@ -201,7 +201,14 @@ class DeterministicMockChatClient:
         )
         shots = [
             {
-                "prompt": f"mock cinematic story beat {(index - 1) % 4 + 1}, stable protagonist and lighting",
+                # The local planner is also the no-chat fallback for a live video
+                # run. Keep every five-second motion prompt unique while retaining
+                # one still identity per six-shot scene, so a 24-clip cap lands on
+                # 24 real editorial moments rather than four deduplicated loops.
+                "prompt": (
+                    f"cinematic scene {(index - 1) // 6 + 1}, editorial beat {(index - 1) % 6 + 1}, "
+                    f"{camera_moves[(index - 1) % 6]}, stable protagonist, wardrobe, and lighting"
+                ),
                 "stillPrompt": f"mock scene {(index - 1) // 6 + 1}, stable protagonist and location",
                 "cameraMove": camera_moves[(index - 1) % 6],
                 "imageRefs": [],

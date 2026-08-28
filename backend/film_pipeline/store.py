@@ -7,6 +7,7 @@ process crash cannot insert a second generation for the same requested render.
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import threading
 import time
@@ -109,6 +110,8 @@ class FilmJobStore:
                     aspect_ratio TEXT NOT NULL,
                     provider TEXT,
                     seat TEXT,
+                    router_session TEXT,
+                    router_tenant TEXT,
                     status TEXT NOT NULL,
                     remote_job_id TEXT,
                     remote_url TEXT,
@@ -150,6 +153,20 @@ class FilmJobStore:
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_film_owners_user ON film_owners(user_id);
+                CREATE TABLE IF NOT EXISTS film_artifacts (
+                    id TEXT PRIMARY KEY,
+                    film_id TEXT NOT NULL UNIQUE REFERENCES films(id) ON DELETE CASCADE,
+                    owner_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    original_bytes INTEGER NOT NULL,
+                    stored_bytes INTEGER NOT NULL,
+                    compression TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_film_artifacts_owner ON film_artifacts(owner_id, created_at DESC);
                 """
             )
             # The project is intentionally migration-light for the local durable SQLite
@@ -166,6 +183,10 @@ class FilmJobStore:
                 conn.execute("ALTER TABLE clip_jobs ADD COLUMN fallback_kind TEXT")
             if "fallback_detail" not in job_columns:
                 conn.execute("ALTER TABLE clip_jobs ADD COLUMN fallback_detail TEXT")
+            if "router_session" not in job_columns:
+                conn.execute("ALTER TABLE clip_jobs ADD COLUMN router_session TEXT")
+            if "router_tenant" not in job_columns:
+                conn.execute("ALTER TABLE clip_jobs ADD COLUMN router_tenant TEXT")
             film_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(films)").fetchall()}
             if "motion_clip_limit" not in film_columns:
                 conn.execute("ALTER TABLE films ADD COLUMN motion_clip_limit INTEGER NOT NULL DEFAULT 0")
@@ -253,6 +274,95 @@ class FilmJobStore:
         with self._lock, self._connection() as conn:
             row = conn.execute("SELECT user_id FROM film_owners WHERE film_id=?", (film_id,)).fetchone()
         return str(row["user_id"]) if row else None
+
+    def films_for_owner(self, user_id: str) -> List[Dict[str, Any]]:
+        """Return complete durable film summaries for one customer or operator history."""
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                "SELECT film_id FROM film_owners WHERE user_id=? ORDER BY created_at DESC", (user_id,)
+            ).fetchall()
+        return [self.summary(str(row["film_id"])) for row in rows]
+
+    def all_film_owners(self) -> List[Dict[str, Any]]:
+        """Operator-only inventory joining every admitted film to its customer."""
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                "SELECT film_id,user_id,created_at FROM film_owners ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def artifact_usage_bytes(self) -> int:
+        with self._lock, self._connection() as conn:
+            row = conn.execute("SELECT COALESCE(SUM(stored_bytes),0) AS bytes FROM film_artifacts").fetchone()
+        return int(row["bytes"] if row else 0)
+
+    def retain_artifact(
+        self,
+        *,
+        film_id: str,
+        owner_id: str,
+        payload: bytes,
+        original_bytes: int,
+        content_type: str = "video/mp4",
+        compression: str = "h264-crf28-aac96k",
+        quota_bytes: int = 10 * 1024 * 1024 * 1024,
+    ) -> Dict[str, Any]:
+        """Atomically retain a compressed final film as a database BLOB.
+
+        The payload is the durable customer artifact; transient clips/segments remain
+        filesystem work files and may be removed after this transaction commits. A
+        database BLOB avoids duplicate ad-hoc film trees and makes quota accounting
+        exact. It is intentionally the final delivery only, not every intermediate.
+        """
+        if not payload:
+            raise ValueError("cannot retain an empty film artifact")
+        stored_bytes = len(payload)
+        quota = max(1, int(quota_bytes))
+        digest = hashlib.sha256(payload).hexdigest()
+        artifact_id = f"artifact_{uuid.uuid4().hex}"
+        with self._lock, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM film_artifacts WHERE film_id=?", (film_id,)
+            ).fetchone()
+            if existing is not None:
+                conn.commit()
+                return self._artifact(existing)
+            used = int(conn.execute("SELECT COALESCE(SUM(stored_bytes),0) AS bytes FROM film_artifacts").fetchone()["bytes"])
+            if used + stored_bytes > quota:
+                conn.rollback()
+                raise ValueError(
+                    f"artifact quota exceeded: {used + stored_bytes} bytes would exceed configured {quota} bytes"
+                )
+            conn.execute(
+                """INSERT INTO film_artifacts
+                   (id,film_id,owner_id,kind,content_type,sha256,original_bytes,stored_bytes,compression,payload,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (artifact_id, film_id, owner_id, "final_film", content_type, digest, int(original_bytes), stored_bytes,
+                 compression, sqlite3.Binary(payload), _now()),
+            )
+            row = conn.execute("SELECT * FROM film_artifacts WHERE id=?", (artifact_id,)).fetchone()
+            conn.commit()
+        return self._artifact(row)
+
+    @staticmethod
+    def _artifact(row: sqlite3.Row) -> Dict[str, Any]:
+        result = dict(row)
+        result.pop("payload", None)
+        result["storage_uri"] = f"db://film-artifacts/{result['id']}"
+        return result
+
+    def artifact_for_film(self, film_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock, self._connection() as conn:
+            row = conn.execute("SELECT * FROM film_artifacts WHERE film_id=?", (film_id,)).fetchone()
+        return self._artifact(row) if row else None
+
+    def artifact_payload(self, artifact_id: str) -> Optional[tuple[Dict[str, Any], bytes]]:
+        with self._lock, self._connection() as conn:
+            row = conn.execute("SELECT * FROM film_artifacts WHERE id=?", (artifact_id,)).fetchone()
+        if row is None:
+            return None
+        return self._artifact(row), bytes(row["payload"])
 
     def set_film_status(self, film_id: str, status: str, *, error: Optional[str] = None, output_path: Optional[str] = None) -> None:
         with self._lock, self._connection() as conn:
@@ -398,12 +508,22 @@ class FilmJobStore:
             ).fetchall()
         return [self._job(row) for row in rows]
 
-    def mark_submitted(self, job_key: str, *, remote_job_id: str, provider: str, seat: Optional[str], credits_reserved: float) -> None:
+    def mark_submitted(
+        self,
+        job_key: str,
+        *,
+        remote_job_id: str,
+        provider: str,
+        seat: Optional[str],
+        credits_reserved: float,
+        router_session: Optional[str] = None,
+        router_tenant: Optional[str] = None,
+    ) -> None:
         with self._lock, self._connection() as conn:
             conn.execute(
-                """UPDATE clip_jobs SET status='queued',remote_job_id=?,provider=?,seat=?,credits_reserved=?,
+                """UPDATE clip_jobs SET status='queued',remote_job_id=?,provider=?,seat=?,router_session=?,router_tenant=?,credits_reserved=?,
                    next_attempt_at=0,updated_at=? WHERE job_key=? AND status='submitting'""",
-                (remote_job_id, provider, seat, float(credits_reserved), _now(), job_key),
+                (remote_job_id, provider, seat, router_session, router_tenant, float(credits_reserved), _now(), job_key),
             )
 
     def record_attempt(self, job_key: str) -> int:
@@ -638,4 +758,8 @@ class FilmJobStore:
         states: Dict[str, int] = {}
         for job in jobs:
             states[job["status"]] = states.get(job["status"], 0) + 1
-        return {**film, "job_states": states, "cost": self.costs(film_id), "segments": self.segments(film_id)}
+        artifact = self.artifact_for_film(film_id)
+        return {
+            **film, "job_states": states, "cost": self.costs(film_id), "segments": self.segments(film_id),
+            **({"artifact": artifact} if artifact else {}),
+        }

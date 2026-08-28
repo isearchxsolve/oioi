@@ -13,6 +13,7 @@ type StudioUser = {
 export function Settings() {
   const [profile, setProfile] = useState<StudioUser | null>(null)
   const [users, setUsers] = useState<StudioUser[]>([])
+  const [history, setHistory] = useState<{ user: StudioUser; projects: unknown[]; assets: unknown[]; films: unknown[]; storage: { artifact_bytes: number; artifact_count: number } } | null>(null)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
 
@@ -70,6 +71,15 @@ export function Settings() {
     }
   }
 
+  async function viewHistory(user: StudioUser) {
+    setError('')
+    try {
+      setHistory(await api.getManagedUserHistory(user.id))
+    } catch {
+      setError('Unable to load this customer history.')
+    }
+  }
+
   if (!profile) return <p className="text-dark-300">Loading your studio profile…</p>
 
   return (
@@ -99,8 +109,11 @@ export function Settings() {
           <button className="rounded bg-primary-500 px-4 py-2 font-semibold text-white">Create customer credentials</button>
         </form>
         <section className="rounded-xl border border-dark-700 bg-dark-900 p-6"><h2 className="text-xl font-semibold text-white">Customer accounts</h2>
-          <ul className="mt-4 space-y-2">{users.filter(user => !user.is_admin).map(user => <li key={user.id} className="flex justify-between rounded bg-dark-950 p-3 text-sm text-dark-200"><span>{user.name || user.email}</span><span>{user.is_active ? 'Active' : 'Disabled'}</span></li>)}</ul>
+          <ul className="mt-4 space-y-2">{users.filter(user => !user.is_admin).map(user => <li key={user.id} className="flex items-center justify-between gap-3 rounded bg-dark-950 p-3 text-sm text-dark-200"><span>{user.name || user.email}</span><span>{user.is_active ? 'Active' : 'Disabled'}</span><button className="rounded border border-dark-600 px-2 py-1" onClick={() => viewHistory(user)}>View history</button></li>)}</ul>
         </section>
+        {history && <section className="rounded-xl border border-dark-700 bg-dark-900 p-6"><h2 className="text-xl font-semibold text-white">{history.user.name || history.user.email} — full history</h2>
+          <p className="mt-3 text-dark-300">{history.projects.length} projects · {history.assets.length} assets · {history.films.length} films · {history.storage.artifact_count} archived deliverables ({Math.round(history.storage.artifact_bytes / 1024 / 1024)} MiB)</p>
+        </section>}
       </>}
     </div>
   )

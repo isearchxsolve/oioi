@@ -610,6 +610,33 @@ async def normalize_clip(
     return dest
 
 
+async def compress_delivery_film(
+    src: Path,
+    dest: Path,
+    *,
+    timeout: float = 3600.0,
+) -> Path:
+    """Create a compact streaming MP4 before durable database retention.
+
+    Intermediate clips are intentionally high quality so assembly is robust. The
+    customer delivery is re-encoded once at CRF 28 with AAC 96k and fast-start
+    metadata; this typically cuts storage materially while retaining the 720p frame
+    geometry and avoids storing every source clip in the artifact database.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp.mp4")
+    args = [
+        ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(src),
+        "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "slow", "-crf", "28",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(tmp),
+    ]
+    result = await run_proc(args, timeout=timeout)
+    if not result.ok or not tmp.exists():
+        raise MediaError(f"delivery compression failed for {src.name}: {result.tail()}")
+    os.replace(tmp, dest)
+    return dest
+
+
 # ------------------------------------------------------------------------ audio
 async def synthesize_music_bed(
     dest: Path,
@@ -1102,6 +1129,7 @@ __all__ = [
     "is_playable",
     "mix_final_audio",
     "normalize_clip",
+    "compress_delivery_film",
     "pollinations_image_url",
     "probe_duration",
     "resolve_size",

@@ -31,6 +31,41 @@ OiiOii is now a closed, owner-operated film-kit SaaS:
 * Chat sessions, saved styles, generated character/scene library entries, uploaded character
   references, and their retrieval route are account-scoped. Local clip discovery is disabled in
   closed-SaaS mode because historical files have no trustworthy owner metadata.
+* The owner can now inspect `GET /api/v1/auth/users/{user_id}/history` (or the aggregate
+  `GET /api/v1/auth/history`) for every project, metadata asset, durable film plan/cost/provenance,
+  and archived final deliverable belonging to a customer. Customer binary media is never embedded
+  in the history JSON; the authorized film artifact route streams it separately.
+
+## Consumer endpoint contract (live film pipeline)
+
+The retired `:20130` chat and `:8189` video job contracts are no longer used by the durable live
+film consumer. The pipeline now targets `http://127.0.0.1:8190`:
+
+| Capability | Contract used | Verification / provenance |
+| --- | --- | --- |
+| Discovery | `GET /v1/models` | A successful request returned 53 advertised models. |
+| Crew planning | `POST /v1/chat/completions`, `model: session-pool/auto` | OpenAI-shaped response; provider, session, and tenant are preserved. |
+| Motion generation | `POST /v1/chat/completions`, `model: video/auto` | The bridge routes over 24 advertised seat records (the generic alias is excluded); provider/session/tenant are recorded with the durable job. |
+| Pinned route | `video/labs.google/auto` | Advertised by `/v1/models`; set `FILM_PIPELINE_VIDEO_MODEL=video/labs.google/auto` (or CLI `--video-model`) to pin it deliberately. |
+
+The default production duration is now **180 seconds (three minutes)**. A live run still requires
+an explicit positive `max_clips`, leaves the slate-quality gate armed by default, and records the
+router provenance for every submitted motion job. If the bridge returns a completed video URL
+inline, that receipt is persisted immediately, so a subsequent authenticated scheduler tick does
+not depend on a process-local client handle.
+
+## Storage policy: 10 GiB managed delivery quota
+
+The filesystem is no longer the durable customer-media store. FFmpeg uses a short-lived work tree
+for source clips, segments, audio, and assembly; after a final MP4 succeeds, OiiOii re-encodes it
+once to a delivery profile (H.264 CRF 28, AAC 96k, fast-start), retains that one result as a
+database BLOB with SHA-256 metadata, then removes only that film's temporary work directory.
+
+`FILM_ARTIFACT_QUOTA_BYTES=10737418240` sets an exact 10 GiB catalog limit. The storage transaction
+rejects an artifact that would exceed the quota and never deletes a valid local final if compression
+or database retention fails. This is deliberately not a BLOB for every intermediate clip: doing
+that would waste quota and inflate database write amplification. The admin history exposes exact
+compressed byte usage and artifact counts.
 
 ## Required deployment configuration
 
@@ -43,6 +78,7 @@ OIOI_CLOSED_SAAS_MODE=true
 OIOI_OWNER_EMAIL=your-private-owner-email
 OIOI_OWNER_INITIAL_PASSWORD=a-unique-password-of-at-least-12-characters
 OIOI_AUTH_SESSION_TTL_HOURS=168
+FILM_ARTIFACT_QUOTA_BYTES=10737418240
 ```
 
 Do not commit the real `.env`. After the first successful owner login, remove
@@ -83,7 +119,7 @@ following infrastructure work:
 | --- | --- | --- |
 | Default database is SQLite | SQLite serializes writers and the local path is not shareable across hosts. | Run PostgreSQL for all application data; keep the FilmJobStore on a single worker until it too is migrated or give it a shared transactional store. |
 | Process-local chat/library/pipeline state | A request sent to another Uvicorn worker will not see that worker’s memory. | Move chat sessions, library metadata, and pipeline state to PostgreSQL/Redis, then remove the in-memory maps. |
-| Local artifact paths | Multiple hosts do not share `storage/` or film artifacts. | Store artifacts in S3/GCS/MinIO, record object keys in the database, and issue tenant-authorized download URLs. |
+| Database BLOB artifact store | The 10 GiB local database catalog is correct for a single-host closed beta but is not ideal for multi-host delivery. | Keep the metadata/quota schema and move BLOB payloads to S3/GCS/MinIO before scale-out; issue tenant-authorized download URLs. |
 | In-process scheduler | Two application processes can each schedule; SQLite protects a single file but is not a distributed job queue. | Use one scheduler worker/leader or a PostgreSQL-backed queue with advisory locks and idempotency keys. |
 | Provider capacity is finite | Concurrent customer requests can still exhaust the 4-seat/credit upstream pool. | Add per-tenant quotas, a durable queue, provider budget reservations, retry visibility, and admission estimates. |
 | No durable per-user login/generation limit | A customer or attacker can still concentrate requests against the local process or finite provider pool. | Add route-level login limits and user-ID plus IP quotas backed by Redis. |

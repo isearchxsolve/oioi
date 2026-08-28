@@ -21,13 +21,13 @@ def _arguments() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Durable long-form film consumer")
     parser.add_argument("--script", help="Screenplay or generation brief")
     parser.add_argument("--script-file", help="UTF-8 screenplay file; avoids shell quoting limits for full scripts.")
-    parser.add_argument("--target-seconds", type=int, default=15, help="1800 for a 30-minute film")
+    parser.add_argument("--target-seconds", type=int, default=180, help="Target runtime in seconds; production default is 180 (three minutes).")
     parser.add_argument("--aspect-ratio", default="16:9")
     parser.add_argument("--admission-mode", choices=("refuse", "waves"), default="refuse")
     parser.add_argument("--backend", choices=("mock", "fallback", "live"), default="mock")
     parser.add_argument(
         "--planner", choices=("mock", "pool"), default="mock",
-        help="Use deterministic zero-network planning, or the local :20130 crew chat pool.",
+        help="Use deterministic zero-network planning, or the live :8190 session-pool chat consumer.",
     )
     parser.add_argument("--live", action="store_true", help="Required with --backend live")
     parser.add_argument("--max-clips", type=int, default=0, help="Positive hard cap required in live mode")
@@ -46,11 +46,23 @@ def _arguments() -> argparse.ArgumentParser:
         help="Persist and print the durable plan without making any video submission; useful for approving a live pool plan.",
     )
     parser.add_argument("--storage", default="./storage/film_pipeline")
+    parser.add_argument(
+        "--owner-id",
+        help="Optional existing SaaS user ID. When supplied, the completed final is archived into the managed artifact database.",
+    )
     parser.add_argument("--mock-capacity", type=int, default=4)
-    parser.add_argument("--chat-base-url", default=os.getenv("FILM_PIPELINE_CHAT_BASE_URL", "http://127.0.0.1:20130"))
-    parser.add_argument("--video-base-url", default=os.getenv("FILM_PIPELINE_VIDEO_BASE_URL", "http://127.0.0.1:8189"))
-    parser.add_argument("--per-provider-cap", type=int, default=1)
+    parser.add_argument("--chat-base-url", default=os.getenv("FILM_PIPELINE_CONSUMER_BASE_URL", "http://127.0.0.1:8190"))
+    parser.add_argument("--video-base-url", default=os.getenv("FILM_PIPELINE_CONSUMER_BASE_URL", "http://127.0.0.1:8190"))
+    parser.add_argument(
+        "--video-model", default=os.getenv("FILM_PIPELINE_VIDEO_MODEL", "video/auto"),
+        help="Consumer video route: video/auto, or a pinned video/<host>/auto route.",
+    )
+    parser.add_argument(
+        "--per-provider-cap", type=int, default=4,
+        help="Concurrent dispatches per advertised video host (default: 4 seats).",
+    )
     parser.add_argument("--per-seat-cap", type=int, default=1)
+    parser.add_argument("--submit-concurrency", type=int, default=24, help="Maximum parallel live dispatches; bounded by max-clips.")
     parser.add_argument("--fallback-concurrency", type=int, default=4)
     parser.add_argument(
         "--still-request-gap", type=float, default=1.0,
@@ -94,9 +106,13 @@ async def _run(args: argparse.Namespace) -> int:
             if fallback_only else SyntheticFallbackClipMaterializer()
         )
     else:
-        chat = ChatPoolClient(args.chat_base_url)
+        # Live motion and live planning are independent controls. A strict pool
+        # planning preflight can fail loudly without preventing an explicitly
+        # authorized render from using the deterministic, provider-free planner.
+        # Do not silently turn `--planner mock` into a consumer chat request.
+        chat = ChatPoolClient(args.chat_base_url) if args.planner == "pool" else DeterministicMockChatClient()
         video = VideoRouterClient(
-            args.video_base_url,
+            args.video_base_url, video_model=args.video_model,
             mode="live", live=True, max_clips=args.max_clips,
         )
         materializer = HttpClipMaterializer()
@@ -107,6 +123,7 @@ async def _run(args: argparse.Namespace) -> int:
         segment_size=2 if args.backend == "mock" else 60,
         per_provider_cap=args.per_provider_cap,
         per_seat_cap=args.per_seat_cap,
+        submit_concurrency=args.submit_concurrency,
         fallback_concurrency=args.fallback_concurrency,
         execution_backend="live" if args.backend == "live" else "mock",
         live=args.live, max_clips=args.max_clips if args.backend == "live" else None,
@@ -131,6 +148,9 @@ async def _run(args: argparse.Namespace) -> int:
         if args.plan_only:
             return 0
         film_id = result["film"]["id"]
+        if args.owner_id and not store.claim_film_owner(film_id, args.owner_id):
+            print("REFUSED: durable film already belongs to a different SaaS user.", file=sys.stderr)
+            return 2
         latest = await pipeline.run_until_idle(film_id, max_ticks=max(1, args.ticks), sleep_seconds=max(0.0, args.tick_sleep))
         print(json.dumps(latest, indent=2, ensure_ascii=False, default=str))
         return 0 if latest["film"]["status"] == "completed" else 1

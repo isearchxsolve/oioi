@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +26,7 @@ from .assembly import (
     KenBurnsFallbackMaterializer,
 )
 from .clients import ChatPoolClient, VideoRouterClient
-from .models import VideoAuthError, VideoNoCapacity, VideoTransientError, VideoWallError
+from .models import VideoAuthError, VideoNoCapacity, VideoSubmissionUnknown, VideoTransientError, VideoWallError
 from .shots import enrich_bible_references, normalize_character_refs, ShotListPlanner, job_key_for_shot, request_key_for_film
 from .store import FilmJobStore
 
@@ -36,7 +38,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class FilmRequest:
     script: str
-    target_seconds: int = 10_800
+    target_seconds: int = 180
     aspect_ratio: str = "16:9"
     style: str = "cinematic"
     image_refs: List[str] = field(default_factory=list)
@@ -75,7 +77,7 @@ class FilmOrchestrator:
         artifact_root: Path | str,
         materializer: Optional[ClipMaterializer] = None,
         fallback_materializer: Optional[FallbackClipMaterializer] = None,
-        per_provider_cap: int = 1,
+        per_provider_cap: int = 4,
         per_seat_cap: int = 1,
         max_attempts: int = 3,
         poll_interval_seconds: float = 5.0,
@@ -86,6 +88,7 @@ class FilmOrchestrator:
         execution_backend: Literal["mock", "live"] = "mock",
         live: bool = False,
         max_clips: Optional[int] = None,
+        artifact_quota_bytes: Optional[int] = None,
     ) -> None:
         self.store = store
         self.chat = chat
@@ -104,6 +107,9 @@ class FilmOrchestrator:
         self.submit_concurrency = max(1, int(submit_concurrency))
         self.execution_backend = execution_backend
         self.live_max_clips = int(max_clips or 0)
+        self.artifact_quota_bytes = max(
+            1, int(artifact_quota_bytes or os.getenv("FILM_ARTIFACT_QUOTA_BYTES", str(10 * 1024 * 1024 * 1024)))
+        )
         if self.execution_backend == "live" and (not live or self.live_max_clips <= 0):
             raise ValueError("live video requires explicit live=True and a positive max_clips safety cap")
 
@@ -182,6 +188,35 @@ class FilmOrchestrator:
                 # FFmpeg build that lacks a score filter used by the richer path.
                 await media.synthesize_silence(music, duration=max(2.0, min(8.0, duration)))
         self.assembler.music = music
+
+    async def _archive_completed_film(self, film_id: str, final: Path) -> None:
+        """Retain a compressed final delivery in SQLite and remove transient work files."""
+        owner_id = self.store.film_owner(film_id)
+        if not owner_id:
+            return
+        existing = self.store.artifact_for_film(film_id)
+        if existing:
+            self.store.set_film_status(film_id, "completed", output_path=str(existing["storage_uri"]))
+            return
+        delivery = final.with_name("film.delivery.mp4")
+        original_bytes = final.stat().st_size
+        try:
+            compact = await media.compress_delivery_film(final, delivery)
+            payload = await asyncio.to_thread(compact.read_bytes)
+            artifact = self.store.retain_artifact(
+                film_id=film_id, owner_id=owner_id, payload=payload, original_bytes=original_bytes,
+                quota_bytes=self.artifact_quota_bytes,
+            )
+            self.store.set_film_status(film_id, "completed", output_path=str(artifact["storage_uri"]))
+        except Exception as exc:
+            # Never discard a valid local final if archive capacity/encoding fails.
+            self.store.set_film_status(film_id, "completed", error=f"artifact archive pending: {type(exc).__name__}: {exc}")
+            return
+        film_dir = self.assembler.root / film_id
+        try:
+            await asyncio.to_thread(shutil.rmtree, film_dir)
+        except OSError:
+            logger.warning("completed film %s was archived but temporary work cleanup failed", film_id)
 
     async def request_film(self, request: FilmRequest) -> Dict[str, Any]:
         """Plan and persist an idempotent graph, recovering a zero-shot crash replay."""
@@ -433,8 +468,24 @@ class FilmOrchestrator:
             self.store.mark_submitted(
                 key, remote_job_id=submitted.job_id, provider=submitted.provider,
                 seat=claimed.get("seat"), credits_reserved=submitted.credits_reserved,
+                router_session=submitted.session, router_tenant=submitted.tenant,
             )
+            if submitted.status in {"succeeded", "failed"}:
+                # The :8190 bridge may complete a render inline. Its receipt must
+                # be durable before this client instance is closed (as happens for
+                # ordinary API tick requests), rather than relying on `_inline_jobs`.
+                self.store.mark_poll(
+                    key, status=submitted.status, provider=submitted.provider, url=submitted.url,
+                    error=submitted.error, credits_spent=submitted.credits_spent,
+                )
             counts["submitted"] += 1
+        except VideoSubmissionUnknown as exc:
+            # A timeout after a POST is not retry-safe under the new consumer API:
+            # it may have rendered and spent upstream even without a local receipt.
+            # Preserve the exact durable job key for reconciliation and never make a
+            # second paid request automatically.
+            self.store.quarantine(key, str(exc))
+            counts["submission_unknown"] += 1
         except VideoNoCapacity as exc:
             if allow_fallback:
                 self.store.mark_fallback_pending(key, f"capacity: {exc}")
@@ -589,6 +640,7 @@ class FilmOrchestrator:
                     film_id, quality["slate_logical_shots"], quality["logical_shots"], 100 * slate_limit,
                 )
             elif final:
+                await self._archive_completed_film(film_id, final)
                 counts["finalized"] += 1
             elif self.store.get_film(film_id)["status"] not in self._TERMINAL_FILM_STATES:
                 self.store.set_film_status(film_id, "running")
