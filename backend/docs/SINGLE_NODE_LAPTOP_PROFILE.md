@@ -16,3 +16,7 @@ when moving to a properly sized multi-worker host.
 For EmergentSH, set `EMERGENT_SINGLE_NODE_MODE=true`; it forces the durable worker
 loop to execute one app-generation job at a time without changing its authentication,
 archive, or consumer-provider contracts.
+
+Customer film production is admitted only through `/films/crew-admissions`, which
+requires the complete seven-stage crew package and explicit Director approval. The
+lower-level `/films/` endpoint is owner-only for controlled maintenance/testing.

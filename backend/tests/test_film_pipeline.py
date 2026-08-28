@@ -796,11 +796,14 @@ def test_film_api_mock_e2e_and_live_safety_gate(tmp_path: Path, monkeypatch: pyt
             })
             assert refused_live.status_code == 400
 
-            created = client.post("/api/v1/films/", json={
-                "script": "A courier crosses a moonlit bridge.", "target_seconds": 15,
+            # The full provider-free E2E admits exactly the same contract that a
+            # customer uses: all crew roles plus explicit Director approval.
+            created = client.post("/api/v1/films/crew-admissions", json={
+                "crew_outputs": _approved_crew_outputs(), "target_seconds": 15,
             })
             assert created.status_code == 200
-            film_id = created.json()["film"]["id"]
+            assert created.json()["directorApproved"] is True
+            film_id = created.json()["admission"]["film"]["id"]
             latest = None
             for _ in range(6):
                 latest = client.post(f"/api/v1/films/{film_id}/tick")

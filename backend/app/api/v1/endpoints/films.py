@@ -154,6 +154,13 @@ def _ensure_film_access(film_id: str, user: User) -> None:
 
 @router.post("/")
 async def create_film(request: FilmCreateRequest, user: User = Depends(get_current_user)):
+    # Customer productions must carry the Director-approved seven-stage handoff.
+    # This lower-level endpoint remains an owner-only operational/test escape hatch.
+    if not user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="customer film admission requires /films/crew-admissions with Director approval",
+        )
     if request.backend == "live" and (not request.live or request.max_clips <= 0):
         raise HTTPException(
             status_code=400,
