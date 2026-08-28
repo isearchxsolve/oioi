@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import sqlite3
 import threading
 import time
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .models import ShotSpec
+from .object_store import LocalObjectStore
 
 
 def _now() -> float:
@@ -39,11 +41,14 @@ def _loads(value: Optional[str], default: Any) -> Any:
 class FilmJobStore:
     """Transactional SQLite store for films and canonical render jobs."""
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, *, object_root: Path | str | None = None) -> None:
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.objects = LocalObjectStore(object_root or (self.path.parent / "object_store"))
         self._lock = threading.RLock()
         self._initialize()
+        if os.getenv("FILM_PIPELINE_MIGRATE_LEGACY_ARTIFACTS", "true").lower() in {"true", "1", "yes", "on"}:
+            self.migrate_legacy_artifacts()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
@@ -163,7 +168,10 @@ class FilmJobStore:
                     original_bytes INTEGER NOT NULL,
                     stored_bytes INTEGER NOT NULL,
                     compression TEXT NOT NULL,
-                    payload BLOB NOT NULL,
+                    -- Legacy databases may retain a payload BLOB. New durable
+                    -- artifacts store only metadata/object_key here.
+                    payload BLOB,
+                    object_key TEXT,
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_film_artifacts_owner ON film_artifacts(owner_id, created_at DESC);
@@ -194,6 +202,9 @@ class FilmJobStore:
                 conn.execute("ALTER TABLE films ADD COLUMN slate_fraction_limit REAL NOT NULL DEFAULT 0.05")
             if "allow_slates" not in film_columns:
                 conn.execute("ALTER TABLE films ADD COLUMN allow_slates INTEGER NOT NULL DEFAULT 0")
+            artifact_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(film_artifacts)").fetchall()}
+            if "object_key" not in artifact_columns:
+                conn.execute("ALTER TABLE film_artifacts ADD COLUMN object_key TEXT")
 
     @staticmethod
     def _film(row: sqlite3.Row) -> Dict[str, Any]:
@@ -334,12 +345,14 @@ class FilmJobStore:
                 raise ValueError(
                     f"artifact quota exceeded: {used + stored_bytes} bytes would exceed configured {quota} bytes"
                 )
+            suffix = ".mp4" if content_type == "video/mp4" else ".bin"
+            digest, object_key, _ = self.objects.put(payload, suffix=suffix)
             conn.execute(
                 """INSERT INTO film_artifacts
-                   (id,film_id,owner_id,kind,content_type,sha256,original_bytes,stored_bytes,compression,payload,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   (id,film_id,owner_id,kind,content_type,sha256,original_bytes,stored_bytes,compression,payload,object_key,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (artifact_id, film_id, owner_id, "final_film", content_type, digest, int(original_bytes), stored_bytes,
-                 compression, sqlite3.Binary(payload), _now()),
+                 compression, sqlite3.Binary(b""), object_key, _now()),
             )
             row = conn.execute("SELECT * FROM film_artifacts WHERE id=?", (artifact_id,)).fetchone()
             conn.commit()
@@ -349,7 +362,7 @@ class FilmJobStore:
     def _artifact(row: sqlite3.Row) -> Dict[str, Any]:
         result = dict(row)
         result.pop("payload", None)
-        result["storage_uri"] = f"db://film-artifacts/{result['id']}"
+        result["storage_uri"] = f"object://film-artifacts/{result['object_key'] or result['id']}"
         return result
 
     def artifact_for_film(self, film_id: str) -> Optional[Dict[str, Any]]:
@@ -362,7 +375,42 @@ class FilmJobStore:
             row = conn.execute("SELECT * FROM film_artifacts WHERE id=?", (artifact_id,)).fetchone()
         if row is None:
             return None
-        return self._artifact(row), bytes(row["payload"])
+        metadata = self._artifact(row)
+        key = row["object_key"] if "object_key" in row.keys() else None
+        if key:
+            path = self.objects.path_for(str(key))
+            if path.is_file():
+                return metadata, path.read_bytes()
+        # Compatibility for artifacts archived before the object-store upgrade.
+        legacy = row["payload"]
+        return (metadata, bytes(legacy)) if legacy else None
+
+    def artifact_path(self, artifact_id: str) -> Optional[tuple[Dict[str, Any], Path]]:
+        """Return an on-disk managed object for efficient Range-capable delivery."""
+        with self._lock, self._connection() as conn:
+            row = conn.execute("SELECT * FROM film_artifacts WHERE id=?", (artifact_id,)).fetchone()
+        if row is None or not row["object_key"]:
+            return None
+        path = self.objects.path_for(str(row["object_key"]))
+        return (self._artifact(row), path) if path.is_file() else None
+
+    def migrate_legacy_artifacts(self) -> int:
+        """Copy old database BLOBs into the managed store without losing reads."""
+        migrated = 0
+        with self._lock, self._connection() as conn:
+            rows = conn.execute("SELECT * FROM film_artifacts WHERE (object_key IS NULL OR object_key='') AND length(payload)>0").fetchall()
+            for row in rows:
+                payload = bytes(row["payload"])
+                suffix = ".mp4" if row["content_type"] == "video/mp4" else ".bin"
+                _, key, _ = self.objects.put(payload, suffix=suffix)
+                conn.execute("UPDATE film_artifacts SET object_key=?,payload=? WHERE id=?", (key, sqlite3.Binary(b""), row["id"]))
+                migrated += 1
+            # SQLite does not return cleared BLOB pages to the filesystem by itself.
+            # This runs only during the deliberate one-time migration, before normal
+            # scheduler work starts, and makes the disk-space benefit real.
+            if migrated and os.getenv("FILM_PIPELINE_VACUUM_AFTER_MIGRATION", "true").lower() in {"true", "1", "yes", "on"}:
+                conn.execute("VACUUM")
+        return migrated
 
     def set_film_status(self, film_id: str, status: str, *, error: Optional[str] = None, output_path: Optional[str] = None) -> None:
         with self._lock, self._connection() as conn:

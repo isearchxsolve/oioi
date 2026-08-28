@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from film_pipeline.assembly import HttpClipMaterializer, SyntheticClipMaterializer
@@ -85,9 +85,13 @@ def _approved_https_refs(values: list[str] | Dict[str, Any]) -> list[str] | Dict
 
 class _ServicePool:
     def __init__(self) -> None:
-        root = Path(os.getenv("FILM_PIPELINE_STORAGE_PATH", "./storage/film_pipeline")).resolve()
+        configured_storage_path = os.getenv("FILM_PIPELINE_STORAGE_PATH")
+        root = Path(configured_storage_path or "./storage/film_pipeline").resolve()
         self.root = root
-        self.store = FilmJobStore(root / "film_jobs.sqlite3")
+        object_root = os.getenv("FILM_PIPELINE_OBJECT_STORE_PATH")
+        if not object_root and os.name == "nt" and not configured_storage_path:
+            object_root = r"D:\oioi-data\object-store\oioi-films"
+        self.store = FilmJobStore(root / "film_jobs.sqlite3", object_root=object_root)
         self.mock_backend = MockVideoBackend()
         self._mock: Optional[FilmOrchestrator] = None
         self._live: Optional[FilmOrchestrator] = None
@@ -206,11 +210,15 @@ async def get_film(film_id: str, user: User = Depends(get_current_user)):
 
 @router.get("/{film_id}/artifact")
 async def get_film_artifact(film_id: str, user: User = Depends(get_current_user)):
-    """Return the owner-authorized compressed final stored in the artifact database."""
+    """Return the owner-authorized compressed final from the managed object store."""
     _ensure_film_access(film_id, user)
     artifact = _services.store.artifact_for_film(film_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="archived film artifact not found")
+    managed = _services.store.artifact_path(str(artifact["id"]))
+    if managed is not None:
+        metadata, path = managed
+        return FileResponse(path, media_type=str(metadata["content_type"]), headers={"ETag": str(metadata["sha256"]), "Cache-Control": "private, max-age=3600"})
     payload = _services.store.artifact_payload(str(artifact["id"]))
     if payload is None:
         raise HTTPException(status_code=404, detail="archived film artifact not found")

@@ -810,7 +810,7 @@ def test_film_api_mock_e2e_and_live_safety_gate(tmp_path: Path, monkeypatch: pyt
             assert latest.json()["film"]["status"] == "completed"
             readback = client.get(f"/api/v1/films/{film_id}")
             assert readback.status_code == 200
-            assert readback.json()["output_path"].startswith("db://film-artifacts/")
+            assert readback.json()["output_path"].startswith("object://film-artifacts/")
             artifact = client.get(f"/api/v1/films/{film_id}/artifact")
             assert artifact.status_code == 200
             assert artifact.headers["content-type"].startswith("video/mp4")
