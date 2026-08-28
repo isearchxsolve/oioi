@@ -88,8 +88,16 @@ class _ServicePool:
         configured_storage_path = os.getenv("FILM_PIPELINE_STORAGE_PATH")
         root = Path(configured_storage_path or "./storage/film_pipeline").resolve()
         self.root = root
+        storage_mode = os.getenv("PLATFORM_ARTIFACT_STORAGE_MODE", "single_node").strip().lower()
+        if storage_mode not in {"single_node", "shared_filesystem"}:
+            raise RuntimeError("PLATFORM_ARTIFACT_STORAGE_MODE must be single_node or shared_filesystem")
         object_root = os.getenv("FILM_PIPELINE_OBJECT_STORE_PATH")
-        if not object_root and os.name == "nt" and not configured_storage_path:
+        if storage_mode == "shared_filesystem":
+            shared_root = os.getenv("PLATFORM_ARTIFACT_SHARED_ROOT", "").strip()
+            if not shared_root:
+                raise RuntimeError("PLATFORM_ARTIFACT_SHARED_ROOT is required for shared_filesystem storage")
+            object_root = str(Path(shared_root) / "oioi-films")
+        elif not object_root and os.name == "nt" and not configured_storage_path:
             object_root = r"D:\oioi-data\object-store\oioi-films"
         self.store = FilmJobStore(root / "film_jobs.sqlite3", object_root=object_root)
         self.mock_backend = MockVideoBackend()

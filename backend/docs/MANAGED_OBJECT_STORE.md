@@ -17,3 +17,21 @@ The owner-authorized artifact endpoint reads the managed file through `FileRespo
 preserving HTTP Range handling for MP4 playback. Objects are never statically mounted
 or publicly enumerable. EmergentSH uses the parallel root
 `D:\oioi-data\object-store\emergentsh-apps` for compressed generated-app ZIPs.
+
+## One-variable storage profile
+
+`PLATFORM_ARTIFACT_STORAGE_MODE=single_node` is the laptop default. It stores the
+two applications below their managed local roots on `D:`. To move artifact delivery
+to shared storage without changing any database records, URLs, SHA keys, owner rules,
+or API contracts, set:
+
+```text
+PLATFORM_ARTIFACT_STORAGE_MODE=shared_filesystem
+PLATFORM_ARTIFACT_SHARED_ROOT=\\server\private-oioi-artifacts
+```
+
+OiiOii then uses `<shared root>\oioi-films` and EmergentSH uses `<shared
+root>\emergentsh-apps`. Every worker must mount the exact same private path. This
+switch scales artifact storage horizontally; OiiOii's SQLite job scheduler still
+requires a shared PostgreSQL scheduler migration before multiple film workers are
+enabled.
