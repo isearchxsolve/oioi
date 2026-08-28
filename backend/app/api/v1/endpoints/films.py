@@ -7,6 +7,7 @@ live fan-out.
 from __future__ import annotations
 
 import os
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 from urllib.parse import urlparse
@@ -24,6 +25,7 @@ from film_pipeline.orchestrator import FilmOrchestrator, FilmRequest
 from film_pipeline.store import FilmJobStore
 from app.api.v1.dependencies.auth import get_current_user
 from app.models.user import User
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -89,6 +91,9 @@ class _ServicePool:
         self.mock_backend = MockVideoBackend()
         self._mock: Optional[FilmOrchestrator] = None
         self._live: Optional[FilmOrchestrator] = None
+        # This is intentionally process-local: the single-node profile requires
+        # one Uvicorn worker. Durable job claims still guard clip-level replay.
+        self.single_node_tick_lock = asyncio.Lock()
 
     def get(self, backend: str, *, max_clips: int = 0) -> FilmOrchestrator:
         if backend == "mock":
@@ -113,7 +118,11 @@ class _ServicePool:
                 video_model=os.getenv("FILM_PIPELINE_VIDEO_MODEL", "video/auto"),
             ),
             artifact_root=self.root / "artifacts", materializer=HttpClipMaterializer(),
-            per_provider_cap=4, per_seat_cap=1, submit_concurrency=24,
+            per_provider_cap=1 if settings.SINGLE_NODE_MODE else 4,
+            per_seat_cap=1,
+            submit_concurrency=1 if settings.SINGLE_NODE_MODE else 24,
+            materialize_concurrency=1 if settings.SINGLE_NODE_MODE else 4,
+            fallback_concurrency=1 if settings.SINGLE_NODE_MODE else 4,
             execution_backend="live", live=True, max_clips=max_clips,
         )
 
@@ -229,6 +238,11 @@ async def tick_film(
     orchestrator = _services.get(backend, max_clips=max_clips)
     try:
         _ensure_film_access(film_id, user)
+        if settings.SINGLE_NODE_MODE and _services.single_node_tick_lock.locked():
+            raise HTTPException(status_code=409, detail="single-node film worker is busy; retry this durable job shortly")
+        if settings.SINGLE_NODE_MODE:
+            async with _services.single_node_tick_lock:
+                return await orchestrator.tick(film_id)
         return await orchestrator.tick(film_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

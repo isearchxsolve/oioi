@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Final deliverables are compressed then retained as database BLOBs. Intermediate
     # clips remain short-lived FFmpeg work files and are removed after commit.
     FILM_ARTIFACT_QUOTA_BYTES: int = int(os.getenv("FILM_ARTIFACT_QUOTA_BYTES", str(6 * 1024 * 1024 * 1024)))
+    # Temporary single-laptop safety profile. It changes scheduling breadth only;
+    # it does not alter artifact persistence, compression, or provider contracts.
+    SINGLE_NODE_MODE: bool = os.getenv("OIOI_SINGLE_NODE_MODE", "false").lower() == "true"
     
     # CORS
     # The UI runs on :3011 (see .claude/launch.json and the dev script), which was NOT in this list
