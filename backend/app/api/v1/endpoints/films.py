@@ -26,6 +26,7 @@ from film_pipeline.store import FilmJobStore
 from app.api.v1.dependencies.auth import get_current_user
 from app.models.user import User
 from app.core.config import settings
+from app.services.orchestrator import AnimationAgentOrchestrator
 
 router = APIRouter()
 
@@ -60,6 +61,17 @@ class CrewFilmAdmissionRequest(BaseModel):
     crew_outputs: Dict[str, Any]
     target_seconds: Optional[int] = Field(default=None, ge=5)
     aspect_ratio: str = "16:9"
+    image_refs: list[str] = Field(default_factory=list)
+    character_refs: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CrewRunRequest(BaseModel):
+    """Customer brief for the one approved seven-stage planning path."""
+
+    idea: str = Field(min_length=1, max_length=20_000)
+    target_seconds: int = Field(default=180, ge=5, le=1_800)
+    style: str = Field(default="cinematic", min_length=1, max_length=200)
+    aspect_ratio: str = Field(default="16:9")
     image_refs: list[str] = Field(default_factory=list)
     character_refs: Dict[str, Any] = Field(default_factory=dict)
 
@@ -212,6 +224,61 @@ async def admit_crew_film(request: CrewFilmAdmissionRequest, user: User = Depend
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"crew film admission failed: {type(exc).__name__}: {exc}") from exc
+
+
+@router.post("/crew-runs")
+async def run_and_admit_crew_film(request: CrewRunRequest, user: User = Depends(get_current_user)):
+    """Run the complete creative crew through :8190 and durably admit its film.
+
+    This replaces the frontend-visible project pipeline. No in-process
+    ProviderRegistry, direct upstream key, or native video adapter participates
+    in this customer request. Motion scheduling stays the separately explicit
+    durable ``/tick`` operation.
+    """
+    try:
+        image_refs = _approved_https_refs(request.image_refs)
+        character_refs = _approved_https_refs(request.character_refs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    chat = ChatPoolClient(os.getenv("FILM_PIPELINE_CONSUMER_BASE_URL", "http://127.0.0.1:8190"))
+    crew = AnimationAgentOrchestrator(
+        # This instance admits the durable plan only. Rendering occurs only if
+        # the authenticated caller later ticks the returned film ID.
+        film_orchestrator=_services.get("mock"),
+        chat_client=chat,
+    )
+    try:
+        crew_outputs = await crew.run_pipeline(
+            prompt=request.idea,
+            duration=request.target_seconds,
+            style=request.style,
+            project_id=f"film-crew-{user.id}",
+            image_refs=image_refs,
+            character_refs=character_refs,
+        )
+        handoff = crew_outputs.get("film_handoff") or {}
+        admission = handoff.get("admission") if isinstance(handoff, dict) else None
+        film_id = str(((admission or {}).get("film") or {}).get("id") or "")
+        if not film_id:
+            raise CrewHandoffError(str(handoff.get("detail") or "Director did not admit a film"))
+        if not _services.store.claim_film_owner(film_id, user.id):
+            raise HTTPException(status_code=409, detail="film belongs to another account")
+        return {
+            "film_id": film_id,
+            "crew": crew_outputs,
+            "admission": admission,
+            "directorApproved": True,
+            "transport": "http://127.0.0.1:8190/v1",
+        }
+    except CrewHandoffError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"canonical crew execution failed: {type(exc).__name__}: {exc}") from exc
+    finally:
+        await chat.aclose()
 
 
 @router.get("/{film_id}")

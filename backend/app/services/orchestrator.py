@@ -39,6 +39,7 @@ from agent_contracts import (
     DirectorOutput,
 )
 from providers.registry import ProviderRegistry, get_registry
+from providers.base import ChatCompletionResponse
 
 
 class AnimationAgentOrchestrator(AgentOrchestrator):
@@ -50,6 +51,7 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         db_session: Optional[Session] = None,
         model: Optional[str] = None,
         film_orchestrator: Optional[Any] = None,
+        chat_client: Optional[Any] = None,
     ) -> None:
         self.registry = registry or get_registry()
         self.db_session = db_session
@@ -61,6 +63,11 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         # callers that supply the durable Film Orchestrator get an explicit Director
         # approved hand-off instead of a second, disconnected render workflow.
         self.film_orchestrator = film_orchestrator
+        # The approved customer path supplies a ChatPoolClient here.  The old
+        # ProviderRegistry remains injectable solely for the explicitly retired
+        # local demo path; customer crew work must never select an upstream
+        # provider inside OiiOii.
+        self.chat_client = chat_client
 
     # ------------------------------------------------------------------ Helper methods
     async def _persist_execution(
@@ -70,8 +77,13 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         input_data: dict,
         model_id: Optional[str] = None,
         prompt: Optional[str] = None,
-    ) -> AgentExecution:
+    ) -> Optional[AgentExecution]:
         """Create and persist an AgentExecution row with status 'pending'."""
+        if self.db_session is None:
+            # A durable film admission owns production history.  The lightweight
+            # crew runner deliberately has no parallel legacy AgentExecution
+            # store to keep one customer production lineage.
+            return None
         execution = AgentExecution(
             id=str(uuid.uuid4()),
             project_id=project_id,
@@ -88,7 +100,7 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
 
     async def _update_execution(
         self,
-        execution: AgentExecution,
+        execution: Optional[AgentExecution],
         *,
         status: str,
         output_data: Optional[dict] = None,
@@ -98,6 +110,8 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         model_id: Optional[str] = None,
     ) -> None:
         """Update an AgentExecution row with results or error."""
+        if execution is None:
+            return
         execution.status = status
         if output_data is not None:
             execution.output_data = output_data
@@ -121,9 +135,29 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         request: Any,
         prefer: Optional[str] = None,
     ) -> Any:
-        from app.core.config import settings
-        print("DEBUG OPENROUTER URL:", settings.OPENROUTER_API_BASE_URL)
         """Call the provider adapter for a capability and return the raw response."""
+        if self.chat_client is not None:
+            if capability != "chat" or not (hasattr(request, "model") and hasattr(request, "messages")):
+                raise RuntimeError("the canonical crew runner supports chat work only")
+            # The supply contract accepts one OpenAI-shaped user message.  Preserve
+            # every system/user instruction in order without exposing provider
+            # routing to this consumer.
+            transcript = "\n\n".join(
+                f"{str(message.get('role', 'user')).upper()}:\n{message.get('content', '')}"
+                for message in request.messages
+            )
+            reply = await self.chat_client.message(
+                transcript,
+                max_tokens=int(request.max_tokens or 2048),
+                model="session-pool/auto",
+                json_mode=True,
+            )
+            return ChatCompletionResponse(
+                id=f"consumer-{uuid.uuid4().hex}",
+                model="session-pool/auto",
+                choices=[{"index": 0, "message": {"role": "assistant", "content": reply.text}, "finish_reason": "stop"}],
+                usage={"provider": reply.provider, "session": reply.session, "tenant": reply.tenant},
+            )
         adapter = await self.registry.get_adapter(capability=capability, prefer=prefer)
         # Dispatch based on request type
         if hasattr(request, "model") and hasattr(request, "messages"):  # ChatCompletionRequest
@@ -137,22 +171,10 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         raise TypeError(f"Unsupported request type: {type(request)}")
 
     def _parse_json(self, content: str) -> dict:
-        """Robustly parse JSON, stripping markdown code blocks if present."""
-        clean_content = content.strip()
-        if clean_content.startswith("```json"):
-            clean_content = clean_content[7:]
-        elif clean_content.startswith("```"):
-            clean_content = clean_content[3:]
-        if clean_content.endswith("```"):
-            clean_content = clean_content[:-3]
-        clean_content = clean_content.strip()
+        """Parse the gateway's JSON response strictly and fail loudly on garbage."""
         try:
-            return json.loads(clean_content)
+            return json.loads(content)
         except Exception as exc:
-            safe_content = content.encode("ascii", errors="replace").decode("ascii")
-            print(f"JSON Decode Error! Raw content: {safe_content}")
-            with open("json_debug.log", "w", encoding="utf-8") as f:
-                f.write(content)
             raise ValueError(f"Failed to parse JSON: {exc}") from exc
 
     # ------------------------------------------------------------------ Agent implementations
@@ -632,6 +654,8 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         duration: Optional[int] = None,
         style: Optional[str] = None,
         project_id: Optional[str] = None,
+        image_refs: Optional[List[str]] = None,
+        character_refs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run the full agent pipeline and return all intermediate outputs as a dict."""
         project_id = project_id or "default"
@@ -710,6 +734,8 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
                 self.film_orchestrator,
                 result,
                 target_seconds=duration,
+                image_refs=image_refs,
+                character_refs=character_refs,
             )
         return result
 

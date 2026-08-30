@@ -1,8 +1,13 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 from app.api.v1.dependencies.auth import get_current_user
 from app.models.user import User
+from app.api.v1.endpoints import films as films_endpoint
+from studio_pipeline.omniroute import OmniRouteClient, OmniRouteError
 from providers.registry import get_registry, reset_registry
 from providers.base import (
     AIProviderAdapter,
@@ -199,7 +204,18 @@ def test_health_endpoint():
     assert "nim" not in data  # NVIDIA removed per AC-10
 
 
-def test_chat_completions_endpoint():
+def test_chat_completion_uses_the_canonical_consumer(monkeypatch):
+    from app.api.v1.endpoints import chat as chat_endpoint
+
+    class FakeConsumerChat:
+        async def message(self, content, *, max_tokens, model):
+            assert model == "session-pool/auto"
+            return SimpleNamespace(text="A canonical reply", provider="gateway", session="seat-1", tenant="tenant")
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(chat_endpoint, "ChatPoolClient", lambda: FakeConsumerChat())
     client = TestClient(app)
     payload = {
         "messages": [{"role": "user", "content": "Write a script for cyberpunk samurai"}],
@@ -208,28 +224,36 @@ def test_chat_completions_endpoint():
     response = client.post("/api/v1/chat/completions", json=payload)
     assert response.status_code == 200
     data = response.json()
-    assert "choices" in data
+    assert data["choices"][0]["message"]["content"] == "A canonical reply"
+    assert data["provider"] == "gateway"
 
 
-def test_chat_stream_endpoint():
+def test_chat_stream_uses_the_canonical_consumer(monkeypatch):
+    from app.api.v1.endpoints import chat as chat_endpoint
+
+    class FakeConsumerChat:
+        async def message(self, content, *, max_tokens, model):
+            return SimpleNamespace(text="A canonical reply", provider="gateway", session="seat-1", tenant="tenant")
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(chat_endpoint, "ChatPoolClient", lambda: FakeConsumerChat())
     client = TestClient(app)
     response = client.get("/api/v1/chat/stream?prompt=Hello")
     assert response.status_code == 200
     assert "text/event-stream" in response.headers["content-type"]
 
 
-def test_images_generations_endpoint():
+def test_direct_image_generation_endpoint_is_retired():
     client = TestClient(app)
     payload = {
         "prompt": "Cyberpunk cityscape neon rain",
         "style": "Anime",
     }
     response = client.post("/api/v1/images/generations", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert "data" in data
-    assert len(data["data"]) > 0
-    assert "url" in data["data"][0]
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == "legacy_route_retired"
 
 
 def test_videos_generations_endpoint():
@@ -244,16 +268,14 @@ def test_videos_generations_endpoint():
     assert data["detail"]["replacement"] == "/api/v1/films"
 
 
-def test_audio_speech_endpoint():
+def test_direct_audio_speech_endpoint_is_retired():
     client = TestClient(app)
     payload = {
         "input": "In the neon-lit shadows of Neo-Tokyo...",
     }
     response = client.post("/api/v1/audio/speech", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "completed"
-    assert "audio_url" in data
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == "legacy_route_retired"
 
 
 def test_projects_crud_endpoint():
@@ -283,6 +305,13 @@ def test_pipeline_run_endpoint():
     assert response.status_code == 410
     data = response.json()
     assert data["detail"]["code"] == "legacy_route_retired"
+
+
+def test_legacy_studio_client_is_quarantined_without_local_opt_in(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("OIOI_ENABLE_LEGACY_STUDIO_PIPELINE", raising=False)
+    with pytest.raises(OmniRouteError, match="quarantined"):
+        OmniRouteClient()
 
 
 def test_character_reference_upload_is_app_controlled_and_provider_free():
@@ -318,6 +347,44 @@ def test_approved_crew_admission_uses_durable_local_film_graph_without_provider(
     summary = client.get(f"/api/v1/films/{film_id}")
     assert summary.status_code == 200
     assert summary.json()["logical_shots"] == 2
+
+
+@pytest.mark.asyncio
+async def test_canonical_crew_run_uses_only_the_consumer_chat_client(monkeypatch):
+    """The replacement UI endpoint must not reach the ProviderRegistry."""
+    replies = iter(MOCK_AGENT_JSON.values())
+
+    class FakeConsumerChat:
+        async def message(self, content, *, max_tokens, model, json_mode=False):
+            assert model == "session-pool/auto"
+            assert "SYSTEM:" in content
+            assert json_mode is True
+            return SimpleNamespace(
+                text=json.dumps(next(replies)),
+                provider="test-gateway",
+                session="seat-1",
+                tenant="tenant-test",
+            )
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(films_endpoint, "ChatPoolClient", lambda *_args, **_kwargs: FakeConsumerChat())
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id="canonical-crew-user", email="canonical@example.test", is_active=True,
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/v1/films/crew-runs", json={
+                "idea": "A robot finds a luminous flower", "target_seconds": 10,
+            })
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["transport"] == "http://127.0.0.1:8190/v1"
+            assert body["directorApproved"] is True
+            assert body["film_id"]
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 def test_models_endpoint():

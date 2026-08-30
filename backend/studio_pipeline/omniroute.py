@@ -124,6 +124,15 @@ class OmniRouteClient:
         request_timeout: float = 300.0,
         max_retries: int = 4,
     ) -> None:
+        # This client speaks the obsolete :20128/synchronous-video contract.
+        # It is retained solely for local historical diagnostics and must never
+        # become an alternate production film lineage.
+        runtime = os.getenv("APP_ENV", "development").strip().lower()
+        enabled = os.getenv("OIOI_ENABLE_LEGACY_STUDIO_PIPELINE", "false").strip().lower() in {"true", "1", "yes", "on"}
+        if runtime in {"production", "prod"} or not enabled:
+            raise OmniRouteError(
+                "The legacy Studio pipeline is quarantined. Use the durable /api/v1/films consumer path."
+            )
         self.base_url = (
             base_url
             or os.getenv("OMNIROUTE_BASE_URL")

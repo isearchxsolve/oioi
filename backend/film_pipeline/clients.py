@@ -46,13 +46,25 @@ class ChatPoolClient:
         if self._owned:
             await self.client.aclose()
 
-    async def message(self, content: str, *, max_tokens: int = 1024, model: str = "session-pool/auto") -> ChatReply:
+    async def message(
+        self,
+        content: str,
+        *,
+        max_tokens: int = 1024,
+        model: str = "session-pool/auto",
+        json_mode: bool = False,
+    ) -> ChatReply:
         """Make one OpenAI-shaped completion and retain router provenance."""
         payload = {
             "model": model or "session-pool/auto",
             "max_tokens": max(1, int(max_tokens)),
             "messages": [{"role": "user", "content": content}],
         }
+        if json_mode:
+            # The router's strict JSON-intent handling is an end-to-end
+            # contract: request it explicitly and let a malformed provider
+            # response fail the caller's strict parser rather than repairing it.
+            payload["response_format"] = {"type": "json_object"}
         last: Optional[BaseException] = None
         for attempt in range(self.retries + 1):
             try:

@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -63,10 +62,9 @@ app.add_middleware(
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
-# Serve generated media (images, clips, audio) from local storage.
-_media_root = os.path.join(settings.STORAGE_PATH, "media")
-os.makedirs(_media_root, exist_ok=True)
-app.mount("/media", StaticFiles(directory=_media_root), name="media")
+# Generated artifacts are intentionally not mounted as a public static tree.
+# Customer-visible media is served only by ownership-checked API endpoints
+# (for example /api/v1/films/{id}/artifact and /api/v1/assets/*).
 
 @app.get("/health")
 @app.get("/healthz", include_in_schema=False)

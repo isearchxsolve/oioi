@@ -8,6 +8,7 @@ import uuid
 
 from app.core.config import settings
 from app.services.provider_service import get_provider_registry
+from film_pipeline.clients import ChatPoolClient
 from app.api.v1.dependencies.auth import get_current_user
 from app.models.user import User
 from providers.base import ChatCompletionRequest as AdapterChatRequest
@@ -77,13 +78,40 @@ def _content_of(envelope: Dict[str, Any]) -> str:
     return (choices[0].get("message") or {}).get("content") or ""
 
 
+async def _complete_via_consumer(
+    messages: list[Dict[str, str]], *, max_tokens: Optional[int] = None
+) -> Dict[str, Any]:
+    """Use the single approved consumer gateway for customer chat.
+
+    The historical ProviderRegistry helper above is intentionally no longer
+    called by any route.  Retaining it temporarily avoids a broad internal
+    deletion while the registered direct adapters are removed from local tools.
+    """
+    transcript = "\n\n".join(
+        f"{str(message.get('role', 'user')).upper()}:\n{message.get('content', '')}"
+        for message in messages
+    )
+    client = ChatPoolClient()
+    try:
+        reply = await client.message(transcript, max_tokens=max_tokens or 1024, model="session-pool/auto")
+    finally:
+        await client.aclose()
+    return {
+        "id": f"consumer-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "model": "session-pool/auto",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": reply.text}, "finish_reason": "stop"}],
+        "provider": reply.provider,
+        "session": reply.session,
+        "tenant": reply.tenant,
+    }
+
+
 @router.post("/completions")
 async def create_chat_completion(request: ChatCompletionRequest):
-    """Chat completion routed through free-tier ProviderRegistry."""
-    return await _complete(
+    """Customer chat through the canonical session-pool consumer contract."""
+    return await _complete_via_consumer(
         [{"role": m.role, "content": m.content} for m in request.messages],
-        model=request.model,
-        temperature=request.temperature or 0.7,
         max_tokens=request.max_tokens,
     )
 
@@ -94,7 +122,7 @@ async def stream_chat(prompt: str, model: Optional[str] = None):
 
     async def event_generator():
         try:
-            envelope = await _complete([{"role": "user", "content": prompt}], model=model)
+            envelope = await _complete_via_consumer([{"role": "user", "content": prompt}])
         except HTTPException as e:
             yield f"data: {json.dumps({'error': e.detail})}\n\n"
             return
@@ -176,10 +204,9 @@ async def send_chat_message(request: ChatSendRequest, user: User = Depends(get_c
     session["messages"].append({"role": "user", "content": request.message})
     session["updatedAt"] = now
 
-    envelope = await _complete(
+    envelope = await _complete_via_consumer(
         [{"role": "system", "content": CREATIVE_DIRECTOR_PROMPT}]
         + [{"role": m["role"], "content": m["content"]} for m in session["messages"]],
-        model=request.model,
     )
     content = _content_of(envelope)
     session["messages"].append({"role": "assistant", "content": content})

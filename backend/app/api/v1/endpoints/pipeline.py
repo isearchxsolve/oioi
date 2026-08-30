@@ -201,6 +201,7 @@ async def run_pipeline_full(project_id: str, request: PipelineRunRequest, user: 
 @router.post("/{project_id}/pipeline/scriptwriter")
 async def run_pipeline_scriptwriter(project_id: str, request: PipelineRunRequest, user: User = Depends(get_current_user)):
     """Run Agents 1-4 (Scriptwriter to Scene Designer) and pause for approval."""
+    require_legacy_demo_mode()
     registry = await get_provider_registry()
     pipeline = create_animation_pipeline(registry, model=request.model)
     active_pipelines[project_id] = pipeline

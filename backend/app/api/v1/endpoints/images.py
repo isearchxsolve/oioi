@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from app.services.provider_service import get_provider_registry
+from app.api.v1.endpoints.legacy import require_legacy_demo_mode
 
 router = APIRouter()
 
@@ -18,6 +19,7 @@ class ImageGenerationRequest(BaseModel):
 @router.post("/generations")
 async def generate_images(request: ImageGenerationRequest):
     """Generate images via free-tier provider (Pollinations keyless / Cloudflare / Gemini)."""
+    require_legacy_demo_mode()
     registry = await get_provider_registry()
     full_prompt = request.prompt
     if request.style:

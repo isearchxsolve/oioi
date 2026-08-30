@@ -39,24 +39,17 @@ import { Card, CardHeader, CardContent, Button, Input, Label, Select, SelectTrig
 import ChatMode from '@/app/components/ChatMode';
 import { useRouter } from 'next/navigation';
 
-// Sentinel for "no explicit model, let the backend decide". Radix's Select rejects an empty-string
-// item value outright, so the empty selection needs a placeholder token on the wire.
-const SERVER_DEFAULT_MODEL = '__server_default__';
-
 export default function Home() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<'canvas' | 'agents' | 'models' | 'styles' | 'projects' | 'library' | 'chat'>('canvas');
   const [prompt, setPrompt] = useState('Cyberpunk ninja confronting a giant neon dragon in Neo-Tokyo rain');
-  // Empty = "let the server use its configured default". Was 'gemini-2.5-flash', a name the gateway
-  // cannot resolve at all -- unnamespaced it maps to a cookie-auth provider and every call dies on
-  // `[401]: No cookie auth credentials found`.
-  const [selectedModel, setSelectedModel] = useState('');
   const [selectedStyle, setSelectedStyle] = useState('Anime Style 0');
   const [isGenerating, setIsGenerating] = useState(false);
   const [pipelineState, setPipelineState] = useState<'idle' | 'scripting' | 'pending_approval' | 'animating' | 'completed'>('idle');
   const [agentProgress, setAgentProgress] = useState<number>(0);
   const [activeAgent, setActiveAgent] = useState<string>('Director');
   const [generatedScenes, setGeneratedScenes] = useState<any[]>([]);
+  const [durableFilmId, setDurableFilmId] = useState<string | null>(null);
   // Real per-agent status from the backend, replacing the timer that used to drive the progress UI.
   const [stages, setStages] = useState<Array<{ agent: string; status: string; output: string }>>([]);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
@@ -74,7 +67,7 @@ export default function Home() {
     prompt: string;
     imageUrl?: string;
     videoUrl?: string;
-    status: 'idle' | 'generating' | 'ready';
+    status: 'idle' | 'generating' | 'ready' | 'pending' | 'failed';
     aspectRatio: string;
   }>>([]);
   
@@ -169,47 +162,49 @@ export default function Home() {
     setActiveAgent('Scriptwriter');
 
     try {
-      // No simulated progression here any more. This used to run a `for (i=0;i<4;i++)` loop that
-      // advanced the agent name and the progress bar every 800ms alongside the real request --
-      // so the UI always showed four agents sailing through in 3.2s while the actual call took
-      // ~40s, and showed the same confident march when the call was about to fail.
-      const res = await fetch('/api/v1/projects/new-project/pipeline/scriptwriter', {
+      // Customer film work has one lineage: canonical crew chat followed by a
+      // Director-approved durable film admission.  The old project pipeline
+      // selects providers inside OiiOii and is deliberately no longer used.
+      const res = await fetch('/api/v1/films/crew-runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           idea: prompt,
           style: selectedStyle,
           aspect_ratio: '16:9',
-          model: selectedModel || undefined,
+          target_seconds: 180,
         })
       });
 
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
 
-      // Real per-stage status from the backend, which now derives it from what each agent produced.
-      if (Array.isArray(data.stages)) {
-        setStages(data.stages);
-        const done = data.stages.filter((s: any) => s.status === 'completed').length;
-        setAgentProgress(Math.round((done / data.stages.length) * 100));
-      }
-
-      if (data.result?.scenes?.length) {
-        setGeneratedScenes(data.result.scenes);
-        setPanels(data.result.scenes.map((scene: any, i: number) => ({
+      const crew = data?.crew;
+      const scenes = crew?.scene_designer?.scenes || crew?.scriptwriter?.scenes || [];
+      const stageNames = ['scriptwriter', 'art_director', 'character_designer', 'scene_designer', 'storyboard_artist', 'animator', 'sound_director', 'director'];
+      if (crew && Array.isArray(scenes) && data?.film_id) {
+        setDurableFilmId(data.film_id);
+        setStages(stageNames.map((role) => ({
+          agent: role.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
+          status: crew[role] ? 'completed' : 'failed',
+          output: crew[role] ? 'Director-approved durable handoff recorded' : 'No stage output',
+        })));
+        setAgentProgress(100);
+        setGeneratedScenes(scenes);
+        setPanels(scenes.map((scene: any, i: number) => ({
           id: i + 1,
           title: `Scene ${scene.scene || i + 1}`,
-          prompt: scene.visual_prompt,
+          prompt: scene.visual_prompt || scene.prompt || scene.description || '',
           imageUrl: scene.image_url,
-          // Status reflects what exists. Was hardcoded 'ready', which is why panels with no image
-          // and no video still displayed a green READY badge.
+          // Planning is complete, but the UI never claims a render until a
+          // durable scheduler tick returns actual clip material.
           status: scene.image_url ? 'ready' : 'pending',
           aspectRatio: '16:9',
         })));
         setPipelineState('pending_approval');
-        setActiveAgent('Human Approval Required');
+        setActiveAgent('Director Approval Recorded — Render When Ready');
       } else {
-        throw new Error('Scriptwriter returned no scenes');
+        throw new Error('Canonical crew run returned no durable film plan');
       }
     } catch (err: any) {
       // Was console.error only, so a failed run looked identical to one that never started.
@@ -227,38 +222,37 @@ export default function Home() {
     setActiveAgent('Animator');
 
     try {
-      const res = await fetch('/api/v1/projects/new-project/pipeline/animate', {
+      if (!durableFilmId) throw new Error('No Director-approved durable film is ready to schedule');
+      const res = await fetch(`/api/v1/films/${durableFilmId}/tick`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenes: generatedScenes, model: selectedModel || undefined })
+        body: JSON.stringify({})
       });
 
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
 
-      if (Array.isArray(data.stages)) setStages(data.stages);
-
-      if (data.result?.animation) {
-        setPanels(prev => data.result.animation.map((anim: any, i: number) => ({
-          ...(prev[i] || { ...prev[0], id: i + 1 }),
-          title: `Scene ${anim.scene || i + 1}`,
-          videoUrl: anim.video_url,
-          // 'ready' only when a clip actually came back. The Animator can legitimately return
-          // per-scene errors (a signed-out Flow tab, an exhausted credit budget) and those scenes
-          // must not be badged READY.
-          status: anim.video_url ? 'ready' : anim.error ? 'failed' : 'pending',
-          error: anim.error,
-        })));
+      const clips = data?.film?.clips || [];
+      if (Array.isArray(clips)) {
+        setPanels(prev => prev.map((panel, index) => {
+          const clip = clips[index] || {};
+          return {
+            ...panel,
+            videoUrl: clip.url || panel.videoUrl,
+            status: clip.url ? 'ready' : panel.status,
+          };
+        }));
       }
-      // Surface the clip tally rather than assuming success: video.failed > 0 is a real outcome.
-      if (data.video?.failed) {
-        setPipelineError(
-          `${data.video.rendered}/${data.video.rendered + data.video.failed} clips rendered. ` +
-          (data.video.errors?.[0] || '')
-        );
+      const finalStatus = data?.film?.status;
+      if (finalStatus === 'failed' || finalStatus === 'quality_blocked_slates') {
+        setPipelineError(`Durable film scheduler stopped with status: ${finalStatus}`);
+        setPipelineState('idle');
+      } else {
+        // One tick is intentionally bounded; queued/running durable work can
+        // be ticked again by the same explicit scheduler control.
+        setPipelineState(finalStatus === 'completed' ? 'completed' : 'pending_approval');
+        setAgentProgress(100);
       }
-      setPipelineState('completed');
-      setAgentProgress(100);
     } catch (err: any) {
       console.error(err);
       setPipelineError(err?.message || 'Animator failed');
@@ -392,25 +386,12 @@ export default function Home() {
             <div className="space-y-2">
               <Label className="text-xs font-semibold text-slate-300 flex items-center space-x-1.5 mb-1">
                 <Cpu className="w-3 h-3 text-indigo-400" />
-                <span>AI Model</span>
+                <span>Production AI Route</span>
               </Label>
-              <Select
-                value={selectedModel || SERVER_DEFAULT_MODEL}
-                onValueChange={(value) => setSelectedModel(value === SERVER_DEFAULT_MODEL ? '' : value)}
-              >
-                <SelectTrigger className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-200">
-                  <SelectValue placeholder="Select model..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* Fed by /api/v1/models/ (llm_models). The six <SelectItem>s that used to be
-                      hardcoded here advertised models this gateway does not serve -- including
-                      "Gemini 2.5 Flash", which 401s on every call. */}
-                  <SelectItem value={SERVER_DEFAULT_MODEL}>Server default</SelectItem>
-                  {(registry.models?.llm_models ?? []).map((m: any) => (
-                    <SelectItem key={m.id} value={m.id}>{m.name ?? m.id}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-300">
+                Gateway managed — <code>session-pool/auto</code>
+              </div>
+              <p className="text-[10px] text-slate-500">Provider selection, session rotation, and capacity stay behind the consumer gateway.</p>
             </div>
 
             <div className="space-y-2">
