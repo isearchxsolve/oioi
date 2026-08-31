@@ -38,9 +38,18 @@ import { Card, CardHeader, CardContent, Button, Input, Label, Select, SelectTrig
 // with a render site once that file is repaired.
 import ChatMode from '@/app/components/ChatMode';
 import { useRouter } from 'next/navigation';
+import { apiFetch, clearStoredToken, getStoredToken, setStoredToken } from '@/lib/api-client';
 
 export default function Home() {
   const router = useRouter();
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authUser, setAuthUser] = useState<any | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [setupRequired, setSetupRequired] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<'canvas' | 'agents' | 'models' | 'styles' | 'projects' | 'library' | 'chat'>('canvas');
   const [prompt, setPrompt] = useState('Cyberpunk ninja confronting a giant neon dragon in Neo-Tokyo rain');
   const [selectedStyle, setSelectedStyle] = useState('Anime Style 0');
@@ -104,7 +113,7 @@ export default function Home() {
     const errors: Record<string, string> = {};
     const pull = async (key: string, url: string) => {
       try {
-        const res = await fetch(url);
+        const res = await apiFetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return await res.json();
       } catch (e: any) {
@@ -130,7 +139,91 @@ export default function Home() {
     });
   }, []);
 
-  useEffect(() => { loadRegistry(); }, [loadRegistry]);
+  useEffect(() => {
+    let cancelled = false;
+    const bootstrap = async () => {
+      const token = getStoredToken();
+      if (token) {
+        try {
+          const me = await apiFetch('/api/v1/auth/me');
+          if (me.ok) {
+            const user = await me.json();
+            if (!cancelled) {
+              setAuthToken(token);
+              setAuthUser(user);
+              setAuthChecked(true);
+            }
+            return;
+          }
+        } catch {
+          // Fall through to the unauthenticated setup/login state.
+        }
+        clearStoredToken();
+      }
+      try {
+        const status = await fetch('/api/v1/auth/bootstrap-status');
+        const data = await status.json();
+        if (!cancelled) {
+          setSetupRequired(data.owner_configured !== true);
+          setAuthChecked(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthError('The API is not reachable. Check that the OiiOii backend is running.');
+          setAuthChecked(true);
+        }
+      }
+    };
+    bootstrap();
+    const handleAuthRequired = () => {
+      clearStoredToken();
+      setAuthToken(null);
+      setAuthUser(null);
+      setAuthError('Your session expired. Please sign in again.');
+    };
+    window.addEventListener('oioi:auth-required', handleAuthRequired);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('oioi:auth-required', handleAuthRequired);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authToken) loadRegistry();
+  }, [authToken, loadRegistry]);
+
+  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoginBusy(true);
+    setAuthError(null);
+    try {
+      const res = await fetch('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.access_token) {
+        throw new Error(data?.detail || `Login failed (HTTP ${res.status})`);
+      }
+      setStoredToken(data.access_token);
+      setAuthToken(data.access_token);
+      setAuthUser(data.user ?? null);
+      setLoginPassword('');
+    } catch (error: any) {
+      setAuthError(error?.message || 'Login failed');
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try { await apiFetch('/api/v1/auth/logout', { method: 'POST' }); } catch { /* local logout still wins */ }
+    clearStoredToken();
+    setAuthToken(null);
+    setAuthUser(null);
+    setAuthChecked(true);
+  };
 
   const handleCreateProject = async () => {
     // The button used to be `onClick={() => {/* New project modal */}}` -- a no-op with a comment
@@ -139,7 +232,7 @@ export default function Home() {
     const title = window.prompt('Project title?', prompt.slice(0, 60) || 'Untitled Film');
     if (!title) return;
     try {
-      const res = await fetch('/api/v1/projects/', {
+      const res = await apiFetch('/api/v1/projects/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, description: prompt, aspect_ratio: '16:9' }),
@@ -165,7 +258,7 @@ export default function Home() {
       // Customer film work has one lineage: canonical crew chat followed by a
       // Director-approved durable film admission.  The old project pipeline
       // selects providers inside OiiOii and is deliberately no longer used.
-      const res = await fetch('/api/v1/films/crew-runs', {
+      const res = await apiFetch('/api/v1/films/crew-runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -223,7 +316,7 @@ export default function Home() {
 
     try {
       if (!durableFilmId) throw new Error('No Director-approved durable film is ready to schedule');
-      const res = await fetch(`/api/v1/films/${durableFilmId}/tick`, {
+      const res = await apiFetch(`/api/v1/films/${durableFilmId}/tick`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
@@ -282,6 +375,51 @@ export default function Home() {
   const handleNavigateTo = (path: string) => {
     router.push(path);
   };
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0f] text-slate-100 flex items-center justify-center p-6">
+        <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-[#0d0e15]/95 p-8 shadow-2xl">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center">
+              <Sparkles className="w-5 h-5 text-white" />
+            </div>
+            <div><h1 className="text-lg font-bold">OiiOii.ai Studio</h1><p className="text-xs text-slate-400">Checking secure session…</p></div>
+          </div>
+          <div className="h-2 rounded-full bg-slate-800 overflow-hidden"><div className="h-full w-1/2 bg-cyan-500 animate-pulse" /></div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authToken) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0f] text-slate-100 flex items-center justify-center p-6">
+        <form onSubmit={handleLogin} className="w-full max-w-md rounded-2xl border border-slate-800 bg-[#0d0e15]/95 p-8 shadow-2xl">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center"><Sparkles className="w-5 h-5 text-white" /></div>
+            <div><h1 className="text-lg font-bold">OiiOii.ai Studio</h1><p className="text-xs text-slate-400">Owner-managed film production workspace</p></div>
+          </div>
+          {setupRequired ? (
+            <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 p-4 text-sm text-amber-200">
+              The studio owner account is not configured yet. Set <code className="text-amber-100">OIOI_OWNER_EMAIL</code> and <code className="text-amber-100">OIOI_OWNER_INITIAL_PASSWORD</code> in the backend environment, then restart the API. Public signup is intentionally disabled.
+            </div>
+          ) : (
+            <>
+              <h2 className="text-xl font-semibold mb-1">Sign in</h2>
+              <p className="text-sm text-slate-400 mb-5">Use credentials issued by the studio operator.</p>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Email</label>
+              <input type="email" required value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} className="w-full mb-4 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm outline-none focus:border-cyan-500" autoComplete="username" />
+              <label className="block text-xs font-medium text-slate-300 mb-1">Password</label>
+              <input type="password" required value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} className="w-full mb-4 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm outline-none focus:border-cyan-500" autoComplete="current-password" />
+              <button type="submit" disabled={loginBusy} className="w-full rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 px-4 py-3 text-sm font-semibold disabled:opacity-50">{loginBusy ? 'Signing in…' : 'Sign in'}</button>
+            </>
+          )}
+          {authError && <p className="mt-4 rounded-lg border border-rose-800 bg-rose-950/40 p-3 text-xs text-rose-200">{authError}</p>}
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-slate-100 flex flex-col font-sans">
@@ -358,6 +496,10 @@ export default function Home() {
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             <span>Free-Tier Multi-Provider (NVIDIA-Free)</span>
           </span>
+          {authUser?.email && <span className="text-xs text-slate-400 max-w-40 truncate" title={authUser.email}>{authUser.email}</span>}
+          <button onClick={handleLogout} className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors">
+            Sign out
+          </button>
           <button className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium flex items-center space-x-1.5 transition-colors">
             <Download className="w-3.5 h-3.5" />
             <span>Export Film</span>

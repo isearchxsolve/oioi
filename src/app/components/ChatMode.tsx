@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { Button, Card, CardHeader, CardContent, Input, Label, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toaster, toast } from '@/components/ui';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import axios from 'axios';
+import { apiFetch } from '@/lib/api-client';
 
 interface Message {
   id: string;
@@ -82,8 +82,9 @@ const ChatMode: React.FC = () => {
     queryKey: ['chat-sessions'],
     queryFn: async () => {
       try {
-        const { data } = await axios.get(`${CHAT_API}/sessions`);
-        return data;
+        const response = await apiFetch(`${CHAT_API}/sessions`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json();
       } catch {
         return [];
       }
@@ -96,8 +97,9 @@ const ChatMode: React.FC = () => {
   const { data: modelRegistry } = useQuery({
     queryKey: ['llm-models'],
     queryFn: async () => {
-      const { data } = await axios.get('/api/v1/models/');
-      return data;
+      const response = await apiFetch('/api/v1/models/');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
     },
   });
   const llmModels: any[] = modelRegistry?.llm_models ?? [];
@@ -105,13 +107,19 @@ const ChatMode: React.FC = () => {
   // Send message mutation
   const sendMessageMutation = useMutation({
     mutationFn: async ({ message }: { message: string }) => {
-      const { data } = await axios.post(`${CHAT_API}/send`, {
-        message,
-        sessionId,
-        mode,
-        // Actually sent now, so the dropdown selects the model that answers.
-        model: selectedModel || undefined,
+      const response = await apiFetch(`${CHAT_API}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          sessionId,
+          mode,
+          // Actually sent now, so the dropdown selects the model that answers.
+          model: selectedModel || undefined,
+        }),
       });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.detail || data?.error || `HTTP ${response.status}`);
       return data;
     },
     onSuccess: (response) => {
