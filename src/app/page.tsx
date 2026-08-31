@@ -37,6 +37,7 @@ import { Card, CardHeader, CardContent, Button, Input, Label, Select, SelectTrig
 // therefore every tab, hostage to a component the user cannot even see. Re-add the import together
 // with a render site once that file is repaired.
 import ChatMode from '@/app/components/ChatMode';
+import AdminPanel from '@/app/components/AdminPanel';
 import { useRouter } from 'next/navigation';
 import { apiFetch, clearStoredToken, getStoredToken, setStoredToken } from '@/lib/api-client';
 
@@ -50,6 +51,7 @@ export default function Home() {
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [activeTab, setActiveTab] = useState<'canvas' | 'agents' | 'models' | 'styles' | 'projects' | 'library' | 'chat'>('canvas');
   const [prompt, setPrompt] = useState('Cyberpunk ninja confronting a giant neon dragon in Neo-Tokyo rain');
   const [selectedStyle, setSelectedStyle] = useState('Anime Style 0');
@@ -497,6 +499,7 @@ export default function Home() {
             <span>Free-Tier Multi-Provider (NVIDIA-Free)</span>
           </span>
           {authUser?.email && <span className="text-xs text-slate-400 max-w-40 truncate" title={authUser.email}>{authUser.email}</span>}
+          <button onClick={() => setShowAdminPanel(true)} className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors">{authUser?.is_admin ? 'Admin' : 'Account'}</button>
           <button onClick={handleLogout} className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors">
             Sign out
           </button>
@@ -1068,6 +1071,7 @@ export default function Home() {
           )}
         </section>
       </main>
+      {showAdminPanel && <AdminPanel initialUser={authUser} onProfileUpdated={setAuthUser} onClose={() => setShowAdminPanel(false)} />}
     </div>
   );
 }
