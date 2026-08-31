@@ -521,6 +521,7 @@ export default function Home() {
             <span>Free-Tier Multi-Provider (NVIDIA-Free)</span>
           </span>
           {authUser?.email && <span className="text-xs text-slate-400 max-w-40 truncate" title={authUser.email}>{authUser.email}</span>}
+          {authUser?.is_admin && <a href="/admin/customers" className="px-3.5 py-1.5 rounded-lg bg-cyan-800 hover:bg-cyan-700 border border-cyan-700 text-xs font-medium transition-colors">Activity Centre</a>}
           <button onClick={() => setShowAdminPanel(true)} className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors">{authUser?.is_admin ? 'Admin' : 'Account'}</button>
           <button onClick={handleLogout} className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors">
             Sign out
