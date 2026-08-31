@@ -41,6 +41,24 @@ import AdminPanel from '@/app/components/AdminPanel';
 import { useRouter } from 'next/navigation';
 import { apiFetch, clearStoredToken, getStoredToken, setStoredToken } from '@/lib/api-client';
 
+// Session discovery is a small local request.  It must never be allowed to hold
+// the entire studio behind an unbounded loading screen when a dev proxy, a
+// restarted API, or a stale browser connection stops responding.
+const SESSION_BOOTSTRAP_TIMEOUT_MS = 8_000;
+
+async function fetchForSessionBootstrap(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), SESSION_BOOTSTRAP_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, cache: 'no-store', signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export default function Home() {
   const router = useRouter();
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -144,36 +162,40 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     const bootstrap = async () => {
-      const token = getStoredToken();
-      if (token) {
-        try {
-          const me = await apiFetch('/api/v1/auth/me');
-          if (me.ok) {
-            const user = await me.json();
-            if (!cancelled) {
-              setAuthToken(token);
-              setAuthUser(user);
-              setAuthChecked(true);
-            }
-            return;
-          }
-        } catch {
-          // Fall through to the unauthenticated setup/login state.
-        }
-        clearStoredToken();
-      }
       try {
-        const status = await fetch('/api/v1/auth/bootstrap-status');
+        const token = getStoredToken();
+        if (token) {
+          try {
+            const me = await fetchForSessionBootstrap('/api/v1/auth/me', {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (me.ok) {
+              const user = await me.json();
+              if (!cancelled) {
+                setAuthToken(token);
+                setAuthUser(user);
+              }
+              return;
+            }
+          } catch {
+            // Fall through to the unauthenticated setup/login state.
+          }
+          clearStoredToken();
+        }
+        const status = await fetchForSessionBootstrap('/api/v1/auth/bootstrap-status');
+        if (!status.ok) throw new Error(`bootstrap status returned HTTP ${status.status}`);
         const data = await status.json();
         if (!cancelled) {
           setSetupRequired(data.owner_configured !== true);
-          setAuthChecked(true);
         }
       } catch {
         if (!cancelled) {
           setAuthError('The API is not reachable. Check that the OiiOii backend is running.');
-          setAuthChecked(true);
         }
+      } finally {
+        // This is deliberately unconditional: an aborted or malformed response
+        // must land the operator on a recoverable sign-in/error screen.
+        if (!cancelled) setAuthChecked(true);
       }
     };
     bootstrap();
