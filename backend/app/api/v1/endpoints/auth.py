@@ -17,6 +17,7 @@ from app.core.security import hash_password, verify_password
 from app.models.user import User
 from app.models.project import Project
 from app.models.asset import Asset
+from app.models.auth_session import AuthSession
 from app.services.auth_service import (
     create_session,
     normalize_email,
@@ -88,6 +89,9 @@ async def _customer_history(session: AsyncSession, user: User) -> dict:
         assets = list((await session.scalars(
             select(Asset).where(Asset.project_id.in_(project_ids)).order_by(Asset.created_at.desc())
         )).all())
+    sessions = list((await session.scalars(
+        select(AuthSession).where(AuthSession.user_id == user.id).order_by(AuthSession.last_seen_at.desc())
+    )).all())
     # Import lazily to avoid API-router module initialisation cycles.
     from app.api.v1.endpoints.films import _services
 
@@ -110,6 +114,18 @@ async def _customer_history(session: AsyncSession, user: User) -> dict:
             "artifact_bytes": sum(int((film.get("artifact") or {}).get("stored_bytes") or 0) for film in films),
             "artifact_count": sum(1 for film in films if film.get("artifact")),
         },
+        # Tokens are never returned; this is an owner-visible audit trail only.
+        "sessions": [
+            {
+                "id": item.id,
+                "created_at": item.created_at,
+                "last_seen_at": item.last_seen_at,
+                "expires_at": item.expires_at,
+                "revoked_at": item.revoked_at,
+                "state": "revoked" if item.revoked_at else "issued",
+            }
+            for item in sessions
+        ],
     }
 
 
