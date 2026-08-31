@@ -35,6 +35,6 @@
     ".next/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules", "film-kit-studio", "frontend", "server", "project"
+    "node_modules", "film-kit-studio", "frontend", "server", "project", "unzipped_backup", "src/app/components/Canvas.tsx"
   ]
 }
