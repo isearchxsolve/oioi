@@ -6,12 +6,9 @@ import json
 import time
 import uuid
 
-from app.core.config import settings
-from app.services.provider_service import get_provider_registry
 from film_pipeline.clients import ChatPoolClient
 from app.api.v1.dependencies.auth import get_current_user
 from app.models.user import User
-from providers.base import ChatCompletionRequest as AdapterChatRequest
 
 router = APIRouter()
 
@@ -33,46 +30,6 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
 
 
-async def _complete(messages: List[Dict[str, str]], model: Optional[str] = None,
-                    temperature: float = 0.7, max_tokens: Optional[int] = None) -> Dict[str, Any]:
-    """Run one chat completion through the registry and return the raw envelope.
-
-    Centralised because all three call sites below previously invoked the adapter with the WRONG
-    SIGNATURE: `adapter.chat_completion(messages=..., model=..., stream=...)` as keyword arguments,
-    when every adapter takes a single ChatCompletionRequest object. Nothing here ever worked --
-    /chat/completions answered
-    `'OpenRouterAdapter' object has no attribute 'provider_name'` (the attribute is the method
-    get_provider_name()) and would have raised TypeError immediately after that was fixed.
-    """
-    registry = await get_provider_registry()
-    try:
-        adapter = await registry.get_adapter("chat")
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"No available chat provider: {e}")
-
-    name = adapter.get_provider_name()
-    req = AdapterChatRequest(
-        model=model or settings.DEFAULT_CHAT_MODEL,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens or settings.AGENT_MAX_TOKENS,
-    )
-    started = time.time()
-    try:
-        resp = await adapter.chat_completion(req)
-    except Exception as e:
-        # report_failure takes `reason`, not `error`. Passing error= raised TypeError from inside
-        # the exception handler, replacing the real provider error with a confusing one.
-        registry.report_failure(name, reason=f"{type(e).__name__}: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Provider {name} error: {type(e).__name__}: {e}" if str(e)
-            else f"Provider {name} error: {type(e).__name__}",
-        )
-    registry.report_success(name, latency_ms=(time.time() - started) * 1000)
-    return resp if isinstance(resp, dict) else resp.model_dump()
-
-
 def _content_of(envelope: Dict[str, Any]) -> str:
     choices = envelope.get("choices") or [{}]
     return (choices[0].get("message") or {}).get("content") or ""
@@ -83,9 +40,8 @@ async def _complete_via_consumer(
 ) -> Dict[str, Any]:
     """Use the single approved consumer gateway for customer chat.
 
-    The historical ProviderRegistry helper above is intentionally no longer
-    called by any route.  Retaining it temporarily avoids a broad internal
-    deletion while the registered direct adapters are removed from local tools.
+    Every customer chat route goes through the same canonical client; no
+    in-process provider registry is available at this API boundary.
     """
     transcript = "\n\n".join(
         f"{str(message.get('role', 'user')).upper()}:\n{message.get('content', '')}"
