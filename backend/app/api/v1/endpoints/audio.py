@@ -1,9 +1,20 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+"""Retired direct audio-generation compatibility route.
+
+Audio generation previously returned a third-party URL without going through the
+authenticated consumer boundary.  The route remains mounted only to return an
+explicit migration response; it never calls a provider or fabricates a completed
+artifact.
+"""
+from __future__ import annotations
+
 from typing import Optional
 
-from app.services.provider_service import get_provider_registry
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+
+from app.api.v1.dependencies.auth import get_current_user
 from app.api.v1.endpoints.legacy import require_legacy_demo_mode
+from app.models.user import User
 
 router = APIRouter()
 
@@ -15,14 +26,11 @@ class AudioSpeechRequest(BaseModel):
 
 
 @router.post("/speech")
-async def generate_speech(request: AudioSpeechRequest):
-    """Generate audio speech for characters / narrator."""
+async def generate_speech(
+    request: AudioSpeechRequest,
+    user: User = Depends(get_current_user),
+) -> None:
+    """Reject direct speech generation rather than bypassing ``:8190``."""
+
+    del request, user
     require_legacy_demo_mode()
-    clean_text = request.input.replace(" ", "%20")
-    audio_url = f"https://api.streamelements.com/kappa/v2/speech?voice=Brian&text={clean_text}"
-    return {
-        "status": "completed",
-        "audio_url": audio_url,
-        "voice": request.voice,
-        "text": request.input,
-    }

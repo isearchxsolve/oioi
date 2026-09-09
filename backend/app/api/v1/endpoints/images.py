@@ -1,9 +1,21 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+"""Retired direct image-generation compatibility route.
 
-from app.services.provider_service import get_provider_registry
+The merged consumer contract currently exposes text and video through the
+OpenAI-shaped ``:8190/v1`` surface.  This legacy image endpoint used to call
+OiiOii's in-process provider registry and an external fallback, so it could
+bypass the consumer gateway.  Keep the request shape for stale clients but fail
+closed until a canonical image contract is deliberately added.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+
+from app.api.v1.dependencies.auth import get_current_user
 from app.api.v1.endpoints.legacy import require_legacy_demo_mode
+from app.models.user import User
 
 router = APIRouter()
 
@@ -17,36 +29,11 @@ class ImageGenerationRequest(BaseModel):
 
 
 @router.post("/generations")
-async def generate_images(request: ImageGenerationRequest):
-    """Generate images via free-tier provider (Pollinations keyless / Cloudflare / Gemini)."""
+async def generate_images(
+    request: ImageGenerationRequest,
+    user: User = Depends(get_current_user),
+) -> None:
+    """Reject direct image generation rather than bypassing ``:8190``."""
+
+    del request, user
     require_legacy_demo_mode()
-    registry = await get_provider_registry()
-    full_prompt = request.prompt
-    if request.style:
-        full_prompt = f"{request.prompt}, in {request.style} style"
-
-    try:
-        adapter = await registry.get_adapter("image")
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"No image provider available: {e}")
-
-    try:
-        if hasattr(adapter, "generate_image"):
-            url = await adapter.generate_image(prompt=full_prompt, model=request.model, size=request.size)
-        else:
-            url = f"https://image.pollinations.ai/prompt/{full_prompt.replace(' ', '%20')}"
-        registry.report_success(adapter.provider_name)
-        return {
-            "data": [{"url": url}],
-            "provider": adapter.provider_name,
-            "prompt": full_prompt,
-        }
-    except Exception as e:
-        registry.report_failure(adapter.provider_name, error=e)
-        # Keyless fallback
-        fallback_url = f"https://image.pollinations.ai/prompt/{full_prompt.replace(' ', '%20')}"
-        return {
-            "data": [{"url": fallback_url}],
-            "provider": "pollinations_fallback",
-            "prompt": full_prompt,
-        }
