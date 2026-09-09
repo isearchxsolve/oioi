@@ -442,10 +442,25 @@ def test_styles_endpoint():
     assert data["total"] >= 150
 
 
-def test_providers_health_endpoint():
+def test_providers_health_endpoint(monkeypatch):
+    from app.api.v1.endpoints import providers as providers_endpoint
+
+    class FakeConsumerCatalog:
+        async def models(self):
+            return {"data": [
+                {"id": "video/labs.google/auto"},
+                {"id": "session-pool/auto"},
+            ]}
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(providers_endpoint, "ChatPoolClient", lambda: FakeConsumerCatalog())
     client = TestClient(app)
     response = client.get("/api/v1/providers/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
     assert "providers" in data
+    assert data["transport"] == "http://127.0.0.1:8190/v1"
+    assert data["catalogue_only"] is True
