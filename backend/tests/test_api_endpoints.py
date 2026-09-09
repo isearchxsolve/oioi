@@ -478,15 +478,33 @@ async def test_canonical_crew_run_uses_only_the_consumer_chat_client(monkeypatch
         app.dependency_overrides.pop(get_current_user, None)
 
 
-def test_models_endpoint():
+def test_models_endpoint_uses_canonical_consumer_catalogue(monkeypatch):
+    from app.api.v1.endpoints import models as models_endpoint
+
+    class FakeConsumerCatalog:
+        async def models(self):
+            return {"data": [
+                {"id": "session-pool/auto", "owned_by": "session_pool", "url": "https://upstream.invalid"},
+                {"id": "video/flow/auto", "owned_by": "session_pool"},
+                {"id": "video/flow/auto", "owned_by": "session_pool"},
+                {"id": "frontier", "owned_by": "omniroute", "base_url": "https://upstream.invalid"},
+            ]}
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(models_endpoint, "ChatPoolClient", lambda: FakeConsumerCatalog())
     client = TestClient(app)
     response = client.get("/api/v1/models/")
     assert response.status_code == 200
     data = response.json()
     assert "categories" in data
-    assert len(data["video_models"]) >= 25
-    assert len(data["image_models"]) >= 25
-    assert len(data["llm_models"]) >= 25
+    assert [row["id"] for row in data["video_models"]] == ["video/flow/auto"]
+    assert {row["id"] for row in data["llm_models"]} == {"frontier", "session-pool/auto"}
+    assert data["image_models"] == []
+    assert data["transport"] == "http://127.0.0.1:8190/v1"
+    assert data["catalogue_only"] is True
+    assert all("url" not in row and "base_url" not in row for row in data["video_models"] + data["llm_models"])
 
 
 def test_styles_endpoint():
