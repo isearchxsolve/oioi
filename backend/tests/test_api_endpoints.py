@@ -268,6 +268,30 @@ def test_videos_generations_endpoint():
     assert data["detail"]["replacement"] == "/api/v1/films"
 
 
+def test_video_provider_catalog_uses_canonical_consumer(monkeypatch):
+    from app.api.v1.endpoints import videos as videos_endpoint
+
+    class FakeConsumerCatalog:
+        async def models(self):
+            return {"data": [
+                {"id": "video/auto"},
+                {"id": "video/labs.google/auto"},
+                {"id": "session-pool/auto"},
+            ]}
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(videos_endpoint, "ChatPoolClient", lambda: FakeConsumerCatalog())
+    response = TestClient(app).get("/api/v1/videos/providers")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["transport"] == "http://127.0.0.1:8190/v1"
+    assert body["providers"] == [{
+        "name": "labs.google", "route": "video/labs.google/auto", "reachable": True,
+    }]
+
+
 def test_direct_audio_speech_endpoint_is_retired():
     client = TestClient(app)
     payload = {
