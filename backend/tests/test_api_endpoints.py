@@ -235,6 +235,30 @@ def test_healthz_is_constant_time_liveness(monkeypatch):
     assert data["transport"] == "http://127.0.0.1:8190/v1"
 
 
+def test_assets_only_publish_app_owned_media(monkeypatch, tmp_path):
+    from app.api.v1.endpoints import assets as assets_endpoint
+
+    monkeypatch.setattr(assets_endpoint.settings, "CLOSED_SAAS_MODE", False)
+    local_media = tmp_path / "media"
+    local_media.mkdir()
+    (local_media / "local-test.mp4").write_bytes(b"local clip")
+    monkeypatch.setattr(assets_endpoint, "STORAGE_DIR", local_media)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/assets/")
+    assert response.status_code == 200
+    data = response.json()
+    assert all(clip["provider"] == "local" for clip in data["clips"])
+    assert data["sources"]["provider_harvest"] is False
+
+
+def test_provider_harvest_clip_route_is_retired():
+    client = TestClient(app)
+    response = client.get("/api/v1/assets/clips/flow/old-clip.mp4")
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == "legacy_clip_source_retired"
+
+
 def test_chat_completion_uses_the_canonical_consumer(monkeypatch):
     from app.api.v1.endpoints import chat as chat_endpoint
 

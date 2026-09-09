@@ -1,4 +1,4 @@
-"""Library assets — characters, scenes, styles and the video clips that actually exist.
+"""Library assets owned by this application.
 
 This module was a two-line stub (`router = APIRouter()` and nothing else) while the UI's Library
 tab rendered four hardcoded "No saved characters / scenes / styles / assets" cards. The cards were
@@ -6,9 +6,9 @@ accurate by accident: there was no endpoint to be empty. Now the tab reflects re
 
 Two different kinds of asset live here, and the distinction matters:
 
-* **Clips** are files on disk. The video router writes every finished generation under its harvest
-  directory, so these are enumerated from the filesystem and are true whether or not this process
-  produced them. They survive a restart.
+* **Clips** are app-owned files on disk. Provider/router harvest directories are deliberately not
+  traversed here: they belong to the supply layer and have no customer ownership boundary. Durable
+  film artifacts are served by the `/films` routes after an ownership check.
 * **Characters, scenes and styles** are produced by a pipeline run and held in memory, exactly like
   projects in projects.py. They do NOT survive a restart, which is a real limitation and is
   reported as such by `persistent: false` rather than hidden.
@@ -29,23 +29,12 @@ from app.models.user import User
 
 router = APIRouter()
 
-# Where the OmniRoute video router deposits finished clips. Same default as the router itself uses;
-# override with OMNIROUTE_VIDEO_HARVEST_DIR when the state directory moves.
-HARVEST_DIR = Path(
-    os.getenv("OMNIROUTE_VIDEO_HARVEST_DIR", r"D:\omniroute-monetizer\state\harvest")
-)
 # Local media written by this app (image/audio adapters).
 STORAGE_DIR = Path(os.getenv("STORAGE_PATH", "./storage")) / "media"
 CHARACTER_REFERENCE_DIR = Path(os.getenv("STORAGE_PATH", "./storage")) / "character_references"
 MAX_CHARACTER_REFERENCE_BYTES = 10 * 1024 * 1024
 
 VIDEO_SUFFIXES = {".mp4", ".webm", ".mov"}
-
-# Only these subdirectories of the harvest tree hold generated films, one per video provider.
-# MEASURED: walking the whole tree found 51 "clips", but 45 were screen-recording debris from a
-# sibling rec/ directory (win_recording.mp4 at 48 MB, seg000..seg044 segments) left over from
-# harness debugging. The Library is for the user's films, not the harness's own capture files.
-PROVIDER_DIRS = ("flow", "rtst")
 
 # Populated by pipeline runs via remember_run_outputs(). Keyed by kind.
 _LIBRARY: Dict[str, Dict[str, Dict[str, Any]]] = {
@@ -99,8 +88,8 @@ def remember_run_outputs(project_id: str, characters: List[Dict[str, Any]],
 def _clips() -> List[Dict[str, Any]]:
     """Every generated clip on disk, newest first.
 
-    Walks the harvest tree (flow/, rtst/, ...) and the app's own media directory. The provider is
-    taken from the containing directory name, which is how the router organises its output.
+    Only walks the app-owned media directory. The old provider harvest tree is a sibling service's
+    filesystem and is never a customer asset source, even if a stale compatibility flag is set.
     """
     # Local clip files predate tenant ownership. Do not expose their names or URLs
     # to paid users until each file has durable ownership metadata.
@@ -108,8 +97,6 @@ def _clips() -> List[Dict[str, Any]]:
         return []
     found: List[Dict[str, Any]] = []
     roots = [(STORAGE_DIR, "local")]
-    if settings.ENABLE_LEGACY_HARVEST_ASSETS:
-        roots = [(HARVEST_DIR / d, d) for d in PROVIDER_DIRS] + roots
     for root, provider in roots:
         if not root.exists():
             continue
@@ -156,7 +143,7 @@ async def list_assets(user: User = Depends(get_current_user)):
         # Honest about what is durable. Clips are files; the rest is process memory.
         "persistent": {"clips": True, "characters": False, "scenes": False, "styles": False},
         # Do not reveal machine paths or a sibling router's directory topology.
-        "sources": {"local_media": True, "legacy_harvest_enabled": settings.ENABLE_LEGACY_HARVEST_ASSETS},
+        "sources": {"local_media": True, "provider_harvest": False},
     }
 
 
@@ -240,15 +227,22 @@ async def unsave_style(style_id: str, user: User = Depends(get_current_user)):
 async def get_clip(provider: str, filename: str, user: User = Depends(get_current_user)):
     """Stream one generated clip.
 
-    Both path segments are validated against the enumerated set rather than joined onto
-    HARVEST_DIR directly -- a caller-supplied filename reaching os.path.join is a path-traversal
-    hole (`..%2f..%2fwindows%2fsystem32`), and this route is reachable from the browser.
+    Only app-owned `local` clips are served. Provider-harvest paths are a retired compatibility
+    surface, so rejecting them explicitly prevents a caller from turning this app into a sibling
+    router filesystem browser.
     """
+    if provider != "local":
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "legacy_clip_source_retired",
+                "message": "provider harvest clips are no longer served by the customer API",
+                "replacement": "/api/v1/films/{film_id}/artifact",
+            },
+        )
     for clip in _clips():
         if clip["name"] == filename and clip["provider"] == provider:
-            if provider != "local" and not settings.ENABLE_LEGACY_HARVEST_ASSETS:
-                break
-            root = STORAGE_DIR if provider == "local" else HARVEST_DIR / provider
+            root = STORAGE_DIR
             for candidate in (root / filename, *root.rglob(filename)):
                 if candidate.is_file():
                     # No filename= here on purpose: FileResponse turns that into
