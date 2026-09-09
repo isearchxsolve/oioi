@@ -23,22 +23,61 @@ from .models import (
 )
 
 
-class ChatPoolClient:
-    """Consumer client for the :8190 OpenAI-shaped session-pool contract."""
+CANONICAL_CONSUMER_BASE_URL = "http://127.0.0.1:8190/v1"
+CANONICAL_CONSUMER_ORIGIN = "http://127.0.0.1:8190"
+CANONICAL_CHAT_MODEL = "session-pool/auto"
+
+
+def _consumer_origin(base_url: str, *, injected_client: bool) -> str:
+    """Normalize the documented ``.../v1`` base to an HTTP origin.
+
+    The clients append the versioned path themselves.  Accepting both the
+    documented path and its origin avoids the historical ``/v1/v1`` bug while
+    rejecting non-canonical real network targets.  A caller-supplied HTTPX
+    client is an explicit hermetic-test seam, so its transport may use a fake
+    host without weakening production clients.
+    """
+
+    candidate = str(base_url or CANONICAL_CONSUMER_BASE_URL).rstrip("/")
+    if candidate.endswith("/v1"):
+        candidate = candidate[:-3].rstrip("/")
+    if not injected_client and candidate != CANONICAL_CONSUMER_ORIGIN:
+        raise ValueError(
+            "consumer clients must use http://127.0.0.1:8190/v1; "
+            f"received {base_url!r}"
+        )
+    return candidate or CANONICAL_CONSUMER_ORIGIN
+
+
+class _ConsumerClientMixin:
+    """Shared path handling for owned and injected HTTPX clients."""
+
+    client: httpx.AsyncClient
+
+    def _v1_path(self, suffix: str) -> str:
+        base = getattr(self.client, "base_url", None)
+        path = str(getattr(base, "path", "") or "").rstrip("/")
+        suffix = suffix.lstrip("/")
+        return suffix if path == "/v1" else f"/v1/{suffix}"
+
+
+class ChatPoolClient(_ConsumerClientMixin):
+    """Consumer client for the canonical OpenAI-shaped session-pool contract."""
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:8190",
+        base_url: str = CANONICAL_CONSUMER_BASE_URL,
         *,
         client: Optional[httpx.AsyncClient] = None,
         retries: int = 3,
     ) -> None:
         self._owned = client is None
+        origin = _consumer_origin(base_url, injected_client=not self._owned)
         # Structured multi-shot JSON batches are much larger than a simple chat
         # probe. The consumer pool can legitimately take longer than 45 seconds to
         # route one, so keep strict parsing but grant the contract a 180s read budget.
         self.client = client or httpx.AsyncClient(
-            base_url=base_url.rstrip("/"), timeout=httpx.Timeout(180.0, connect=10.0)
+            base_url=origin, timeout=httpx.Timeout(180.0, connect=10.0)
         )
         self.retries = max(0, retries)
 
@@ -51,12 +90,18 @@ class ChatPoolClient:
         content: str,
         *,
         max_tokens: int = 1024,
-        model: str = "session-pool/auto",
+        model: str = CANONICAL_CHAT_MODEL,
         json_mode: bool = False,
     ) -> ChatReply:
         """Make one OpenAI-shaped completion and retain router provenance."""
+        selected_model = str(model or CANONICAL_CHAT_MODEL).strip()
+        if selected_model != CANONICAL_CHAT_MODEL:
+            raise ValueError(
+                f"consumer chat model must be {CANONICAL_CHAT_MODEL!r}; "
+                f"received {selected_model!r}"
+            )
         payload = {
-            "model": model or "session-pool/auto",
+            "model": selected_model,
             "max_tokens": max(1, int(max_tokens)),
             "messages": [{"role": "user", "content": content}],
         }
@@ -68,7 +113,7 @@ class ChatPoolClient:
         last: Optional[BaseException] = None
         for attempt in range(self.retries + 1):
             try:
-                response = await self.client.post("/v1/chat/completions", json=payload)
+                response = await self.client.post(self._v1_path("chat/completions"), json=payload)
                 if response.status_code == 503:
                     last = VideoTransientError("chat pool is busy (503)")
                     if attempt < self.retries:
@@ -95,7 +140,7 @@ class ChatPoolClient:
 
     async def models(self) -> Dict[str, Any]:
         """Return the session-pool model catalogue from ``GET /v1/models``."""
-        response = await self.client.get("/v1/models")
+        response = await self.client.get(self._v1_path("models"))
         response.raise_for_status()
         body = response.json()
         return body if isinstance(body, dict) else {"data": body}
@@ -108,7 +153,7 @@ class ChatPoolClient:
         return {"status": "healthy", "models": len(models.get("data") or [])}
 
 
-class VideoRouterClient:
+class VideoRouterClient(_ConsumerClientMixin):
     """Video adapter for the :8190 OpenAI-shaped consumer contract.
 
     The router advertises video seats in ``/v1/models`` and dispatches video through
@@ -121,7 +166,7 @@ class VideoRouterClient:
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:8190",
+        base_url: str = CANONICAL_CONSUMER_BASE_URL,
         *,
         client: Optional[httpx.AsyncClient] = None,
         mode: Literal["mock", "live"] = "mock",
@@ -130,11 +175,12 @@ class VideoRouterClient:
         video_model: str = "video/auto",
     ) -> None:
         self._owned = client is None
+        origin = _consumer_origin(base_url, injected_client=not self._owned)
         # A video route can acknowledge an asynchronous render slower than a plain
         # text completion. This is a transport budget only; it does not relax any
         # response parsing or create an imaginary job API.
         self.client = client or httpx.AsyncClient(
-            base_url=base_url.rstrip("/"), timeout=httpx.Timeout(180.0, connect=10.0)
+            base_url=origin, timeout=httpx.Timeout(180.0, connect=10.0)
         )
         self.mode = mode
         self.max_clips = int(max_clips)
@@ -178,7 +224,7 @@ class VideoRouterClient:
             raise VideoTransientError("live video safety cap reached; no further submit is permitted")
         try:
             response = await self.client.post(
-                "/v1/chat/completions",
+                self._v1_path("chat/completions"),
                 json={
                     "model": self.video_model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -243,7 +289,7 @@ class VideoRouterClient:
         if self.mode == "mock":
             return await self._mock_capacity()
         if self._catalogue is None:
-            response = await self.client.get("/v1/models")
+            response = await self.client.get(self._v1_path("models"))
             if response.status_code < 200 or response.status_code >= 300:
                 raise self._error(response)
             body = response.json()
@@ -273,7 +319,7 @@ class VideoRouterClient:
 
     async def cancel(self, job_id: str) -> None:
         if self.mode == "mock":
-            response = await self.client.delete(f"/v1/video/jobs/{job_id}")
+            response = await self.client.delete(self._v1_path(f"video/jobs/{job_id}"))
             response.raise_for_status()
             return
         # The consumer contract intentionally has no cancellation endpoint. Forgetting
@@ -316,7 +362,7 @@ class VideoRouterClient:
         seed: Optional[int],
     ) -> VideoSubmission:
         response = await self.client.post(
-            "/v1/video/jobs",
+            self._v1_path("video/jobs"),
             json={
                 "jobKey": job_key, "prompt": prompt, "durationSeconds": int(duration_seconds),
                 "imageRefs": image_refs, "aspectRatio": aspect_ratio, "seed": seed,
@@ -339,7 +385,7 @@ class VideoRouterClient:
         )
 
     async def _mock_get_job(self, job_id: str) -> VideoJob:
-        response = await self.client.get(f"/v1/video/jobs/{job_id}")
+        response = await self.client.get(self._v1_path(f"video/jobs/{job_id}"))
         if response.status_code < 200 or response.status_code >= 300:
             raise self._error(response)
         body = response.json()
@@ -350,7 +396,7 @@ class VideoRouterClient:
         )
 
     async def _mock_capacity(self) -> VideoCapacity:
-        response = await self.client.get("/v1/video/capacity")
+        response = await self.client.get(self._v1_path("video/capacity"))
         if response.status_code < 200 or response.status_code >= 300:
             raise self._error(response)
         body = response.json()

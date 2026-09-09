@@ -255,6 +255,33 @@ async def test_consumer_v1_contract_preserves_provenance_and_supports_a_pinned_v
     assert [item["model"] for item in received] == ["session-pool/auto", "video/labs.google/auto"]
 
 
+def test_real_consumer_clients_reject_noncanonical_network_targets() -> None:
+    with pytest.raises(ValueError, match="127.0.0.1:8190/v1"):
+        ChatPoolClient("http://localhost:8190")
+    with pytest.raises(ValueError, match="127.0.0.1:8190/v1"):
+        VideoRouterClient("http://127.0.0.1:20128/v1")
+
+
+@pytest.mark.asyncio
+async def test_canonical_path_input_does_not_duplicate_v1_and_chat_model_is_pinned() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": [{"id": "session-pool/auto"}]})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:8190/v1"
+    ) as http:
+        chat = ChatPoolClient(client=http)
+        catalogue = await chat.models()
+        assert catalogue["data"][0]["id"] == "session-pool/auto"
+        with pytest.raises(ValueError, match="consumer chat model"):
+            await chat.message("hello", model="auto/best-coding")
+
+    assert [request.url.path for request in seen] == ["/v1/models"]
+
+
 @pytest.mark.asyncio
 async def test_consumer_video_timeout_is_marked_ambiguous_not_safe_to_repost() -> None:
     """The new consumer API has no job lookup, so a lost POST receipt cannot be replayed."""
