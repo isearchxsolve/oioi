@@ -10,6 +10,7 @@ NVIDIA NIM is a TOTAL NO-GO (AC-10). This module never imports `backend.nim_clie
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -42,6 +43,12 @@ from providers.registry import ProviderRegistry, get_registry
 from providers.base import ChatCompletionResponse
 
 
+def _production_runtime() -> bool:
+    """Read deployment mode at construction time, including test overrides."""
+
+    return os.getenv("APP_ENV", settings.APP_ENV).strip().lower() in {"production", "prod"}
+
+
 class AnimationAgentOrchestrator(AgentOrchestrator):
     """Orchestrator that runs the 7-agent animation pipeline."""
 
@@ -53,6 +60,11 @@ class AnimationAgentOrchestrator(AgentOrchestrator):
         film_orchestrator: Optional[Any] = None,
         chat_client: Optional[Any] = None,
     ) -> None:
+        if chat_client is None and _production_runtime():
+            raise RuntimeError(
+                "canonical ChatPoolClient is required in production; "
+                "direct ProviderRegistry execution is permanently retired"
+            )
         self.registry = registry or get_registry()
         self.db_session = db_session
         # Which LLM the 8 agent calls below ask for. Was settings.DEFAULT_CHAT_MODEL inlined at every

@@ -215,3 +215,12 @@ class TestPipelineIntegration:
         import pytest
         with pytest.raises(RuntimeError, match="No provider available"):
             run_pipeline("A test story")
+
+
+def test_direct_registry_orchestrator_path_is_rejected_in_production(monkeypatch):
+    """The retired compatibility pipeline cannot become a billable prod escape hatch."""
+    from app.services.orchestrator import AnimationAgentOrchestrator
+
+    monkeypatch.setenv("APP_ENV", "production")
+    with pytest.raises(RuntimeError, match="canonical ChatPoolClient"):
+        AnimationAgentOrchestrator(registry=object())
