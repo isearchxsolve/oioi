@@ -194,7 +194,17 @@ def authenticated_api_principal():
     app.dependency_overrides.pop(get_current_user, None)
 
 
-def test_health_endpoint():
+def test_health_endpoint(monkeypatch):
+    import app.main as main_module
+
+    class FakeConsumerCatalog:
+        async def models(self):
+            return {"data": [{"id": "session-pool/auto"}, {"id": "video/labs.google/auto"}]}
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(main_module, "ChatPoolClient", lambda: FakeConsumerCatalog())
     client = TestClient(app)
     response = client.get("/health")
     assert response.status_code == 200
@@ -202,6 +212,27 @@ def test_health_endpoint():
     assert data["status"] == "healthy"
     assert "providers" in data
     assert "nim" not in data  # NVIDIA removed per AC-10
+    assert data["transport"] == "http://127.0.0.1:8190/v1"
+    assert data["catalogue_only"] is True
+
+
+def test_healthz_is_constant_time_liveness(monkeypatch):
+    """The watchdog endpoint must stay green when the protected catalogue is not."""
+    import app.main as main_module
+
+    class ExplodingConsumer:
+        def __init__(self):
+            raise AssertionError("liveness must not construct a consumer client")
+
+    monkeypatch.setattr(main_module, "ChatPoolClient", ExplodingConsumer)
+    client = TestClient(app)
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["consumer_catalogue"] == "not_probed"
+    assert data["providers"] == []
+    assert data["transport"] == "http://127.0.0.1:8190/v1"
 
 
 def test_chat_completion_uses_the_canonical_consumer(monkeypatch):

@@ -255,6 +255,57 @@ async def test_consumer_v1_contract_preserves_provenance_and_supports_a_pinned_v
     assert [item["model"] for item in received] == ["session-pool/auto", "video/labs.google/auto"]
 
 
+@pytest.mark.asyncio
+async def test_consumer_clients_forward_only_the_explicit_consumer_key(monkeypatch) -> None:
+    """Both owned-client paths authenticate the tenant-gated shim consistently."""
+    monkeypatch.setenv("OMNI_CONSUMER_API_KEY", "consumer-test-key")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.headers["authorization"] == "Bearer consumer-test-key"
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "session-pool/auto"}, {"id": "video/test/auto"}]})
+        return httpx.Response(200, json={
+            "provider": "video/test", "session": "seat-test", "tenant": "tenant-test",
+            "choices": [{"message": {"content": json.dumps({"jobId": "job-test", "status": "succeeded"})}}],
+        })
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:8190"
+    ) as http:
+        chat = ChatPoolClient(client=http)
+        await chat.models()
+        await chat.message("hello")
+        video = VideoRouterClient(client=http, mode="live", live=True, max_clips=1)
+        assert (await video.capacity()).total_clips_available == 1
+        await video.submit(
+            job_key="job-test", prompt="a bounded test shot", duration_seconds=5,
+            image_refs=[], aspect_ratio="16:9", seed=None,
+        )
+
+    assert len(seen) == 4
+
+
+@pytest.mark.asyncio
+async def test_consumer_clients_do_not_reuse_the_omniroute_management_key(monkeypatch) -> None:
+    """A management-plane key must never be silently sent to the consumer shim."""
+    monkeypatch.delenv("OMNI_CONSUMER_API_KEY", raising=False)
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "management-only-test-key")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": [{"id": "session-pool/auto"}]})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:8190"
+    ) as http:
+        await ChatPoolClient(client=http).models()
+
+    assert "authorization" not in seen[0].headers
+
+
 def test_real_consumer_clients_reject_noncanonical_network_targets() -> None:
     with pytest.raises(ValueError, match="127.0.0.1:8190/v1"):
         ChatPoolClient("http://localhost:8190")

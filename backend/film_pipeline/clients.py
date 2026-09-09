@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from typing import Any, Dict, Literal, Optional
 
@@ -26,6 +27,21 @@ from .models import (
 CANONICAL_CONSUMER_BASE_URL = "http://127.0.0.1:8190/v1"
 CANONICAL_CONSUMER_ORIGIN = "http://127.0.0.1:8190"
 CANONICAL_CHAT_MODEL = "session-pool/auto"
+CONSUMER_API_KEY_ENV = "OMNI_CONSUMER_API_KEY"
+
+
+def _consumer_auth_headers() -> dict[str, str]:
+    """Return the explicit consumer credential, without borrowing a management key.
+
+    The session-pool shim turns on its tenant gate when ``tenant_map.json`` exists.
+    That credential is intentionally separate from ``OMNIROUTE_API_KEY``, which
+    authenticates the management/upstream plane.  An absent consumer key is left
+    absent so local hermetic tests and an intentionally open development shim retain
+    their documented behavior; a protected shim then returns its normal 401.
+    """
+
+    key = os.getenv(CONSUMER_API_KEY_ENV, "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def _consumer_origin(base_url: str, *, injected_client: bool) -> str:
@@ -73,11 +89,13 @@ class ChatPoolClient(_ConsumerClientMixin):
     ) -> None:
         self._owned = client is None
         origin = _consumer_origin(base_url, injected_client=not self._owned)
+        self._auth_headers = _consumer_auth_headers()
         # Structured multi-shot JSON batches are much larger than a simple chat
         # probe. The consumer pool can legitimately take longer than 45 seconds to
         # route one, so keep strict parsing but grant the contract a 180s read budget.
         self.client = client or httpx.AsyncClient(
-            base_url=origin, timeout=httpx.Timeout(180.0, connect=10.0)
+            base_url=origin, timeout=httpx.Timeout(180.0, connect=10.0),
+            headers=self._auth_headers,
         )
         self.retries = max(0, retries)
 
@@ -113,7 +131,8 @@ class ChatPoolClient(_ConsumerClientMixin):
         last: Optional[BaseException] = None
         for attempt in range(self.retries + 1):
             try:
-                response = await self.client.post(self._v1_path("chat/completions"), json=payload)
+                kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
+                response = await self.client.post(self._v1_path("chat/completions"), json=payload, **kwargs)
                 if response.status_code == 503:
                     last = VideoTransientError("chat pool is busy (503)")
                     if attempt < self.retries:
@@ -140,7 +159,8 @@ class ChatPoolClient(_ConsumerClientMixin):
 
     async def models(self) -> Dict[str, Any]:
         """Return the session-pool model catalogue from ``GET /v1/models``."""
-        response = await self.client.get(self._v1_path("models"))
+        kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
+        response = await self.client.get(self._v1_path("models"), **kwargs)
         response.raise_for_status()
         body = response.json()
         return body if isinstance(body, dict) else {"data": body}
@@ -176,11 +196,13 @@ class VideoRouterClient(_ConsumerClientMixin):
     ) -> None:
         self._owned = client is None
         origin = _consumer_origin(base_url, injected_client=not self._owned)
+        self._auth_headers = _consumer_auth_headers()
         # A video route can acknowledge an asynchronous render slower than a plain
         # text completion. This is a transport budget only; it does not relax any
         # response parsing or create an imaginary job API.
         self.client = client or httpx.AsyncClient(
-            base_url=origin, timeout=httpx.Timeout(180.0, connect=10.0)
+            base_url=origin, timeout=httpx.Timeout(180.0, connect=10.0),
+            headers=self._auth_headers,
         )
         self.mode = mode
         self.max_clips = int(max_clips)
@@ -223,6 +245,7 @@ class VideoRouterClient(_ConsumerClientMixin):
         if self.mode == "live" and self._live_submissions >= self.max_clips:
             raise VideoTransientError("live video safety cap reached; no further submit is permitted")
         try:
+            kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
             response = await self.client.post(
                 self._v1_path("chat/completions"),
                 json={
@@ -238,6 +261,7 @@ class VideoRouterClient(_ConsumerClientMixin):
                         "image_refs": image_refs, "aspect_ratio": aspect_ratio, "seed": seed,
                     },
                 },
+                **kwargs,
             )
         except httpx.HTTPError as exc:
             raise VideoSubmissionUnknown(
@@ -289,7 +313,8 @@ class VideoRouterClient(_ConsumerClientMixin):
         if self.mode == "mock":
             return await self._mock_capacity()
         if self._catalogue is None:
-            response = await self.client.get(self._v1_path("models"))
+            kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
+            response = await self.client.get(self._v1_path("models"), **kwargs)
             if response.status_code < 200 or response.status_code >= 300:
                 raise self._error(response)
             body = response.json()
@@ -319,7 +344,8 @@ class VideoRouterClient(_ConsumerClientMixin):
 
     async def cancel(self, job_id: str) -> None:
         if self.mode == "mock":
-            response = await self.client.delete(self._v1_path(f"video/jobs/{job_id}"))
+            kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
+            response = await self.client.delete(self._v1_path(f"video/jobs/{job_id}"), **kwargs)
             response.raise_for_status()
             return
         # The consumer contract intentionally has no cancellation endpoint. Forgetting
@@ -361,12 +387,14 @@ class VideoRouterClient(_ConsumerClientMixin):
         self, *, job_key: str, prompt: str, duration_seconds: int, image_refs: list[str], aspect_ratio: str,
         seed: Optional[int],
     ) -> VideoSubmission:
+        kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
         response = await self.client.post(
             self._v1_path("video/jobs"),
             json={
                 "jobKey": job_key, "prompt": prompt, "durationSeconds": int(duration_seconds),
                 "imageRefs": image_refs, "aspectRatio": aspect_ratio, "seed": seed,
             },
+            **kwargs,
         )
         if response.status_code == 503:
             try:
@@ -385,7 +413,8 @@ class VideoRouterClient(_ConsumerClientMixin):
         )
 
     async def _mock_get_job(self, job_id: str) -> VideoJob:
-        response = await self.client.get(self._v1_path(f"video/jobs/{job_id}"))
+        kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
+        response = await self.client.get(self._v1_path(f"video/jobs/{job_id}"), **kwargs)
         if response.status_code < 200 or response.status_code >= 300:
             raise self._error(response)
         body = response.json()
@@ -396,7 +425,8 @@ class VideoRouterClient(_ConsumerClientMixin):
         )
 
     async def _mock_capacity(self) -> VideoCapacity:
-        response = await self.client.get(self._v1_path("video/capacity"))
+        kwargs = {"headers": self._auth_headers} if self._auth_headers else {}
+        response = await self.client.get(self._v1_path("video/capacity"), **kwargs)
         if response.status_code < 200 or response.status_code >= 300:
             raise self._error(response)
         body = response.json()

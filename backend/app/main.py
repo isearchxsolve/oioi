@@ -11,12 +11,16 @@ from slowapi.util import get_remote_address
 from app.core.config import settings
 from app.core import database as db
 from app.services.auth_service import OwnerBootstrapError, bootstrap_owner
-from app.services.provider_service import init_registry, shutdown_registry, get_provider_registry
 from app.api.v1.api import api_router
+from film_pipeline.clients import ChatPoolClient
+
+CANONICAL_CONSUMER_BASE_URL = "http://127.0.0.1:8190/v1"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: ensure schema exists and providers are registered.
+    # Startup: ensure schema exists. Provider adapters are not initialized in
+    # the web process; all billable inference belongs to the canonical consumer
+    # gateway and is opened per request by the durable film/chat clients.
     await db.init_db()
     _, session_maker = db._init_engine()
     async with session_maker() as session:
@@ -29,10 +33,7 @@ async def lifespan(app: FastAPI):
             if settings.APP_ENV.lower() in {"production", "prod"}:
                 raise
     os.makedirs(settings.STORAGE_PATH, exist_ok=True)
-    await init_registry()
     yield
-    # Shutdown
-    await shutdown_registry()
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -66,16 +67,63 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 # Customer-visible media is served only by ownership-checked API endpoints
 # (for example /api/v1/films/{id}/artifact and /api/v1/assets/*).
 
-@app.get("/health")
 @app.get("/healthz", include_in_schema=False)
-async def health_check():
-    """Health check endpoint — queries the multi-provider registry snapshot."""
-    registry = await get_provider_registry()
+async def liveness_check():
+    """Constant-time process liveness; never depends on consumer auth or upstreams.
+
+    The Session Pool Shim deliberately protects ``/v1/models`` when its tenant map
+    is present.  Using that authenticated readiness surface for ``/healthz`` made a
+    healthy OiiOii process look dead whenever this app had not been given a tenant
+    bearer.  Readiness is exposed separately at ``/health`` and
+    ``/api/v1/providers/health``; this watchdog endpoint only answers whether this
+    FastAPI process is alive.
+    """
+
     return {
         "status": "healthy",
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
-        "providers": registry.snapshot(),
+        "transport": CANONICAL_CONSUMER_BASE_URL,
+        "providers": [],
+        "catalogue_only": True,
+        "consumer_catalogue": "not_probed",
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Non-spending readiness check against the authenticated consumer catalogue."""
+    client = None
+    try:
+        client = ChatPoolClient()
+        catalogue = await client.models()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "app": settings.APP_NAME,
+                "version": settings.APP_VERSION,
+                "transport": CANONICAL_CONSUMER_BASE_URL,
+                "error": f"canonical catalogue unavailable: {type(exc).__name__}",
+            },
+        )
+    finally:
+        if client is not None:
+            await client.aclose()
+    rows = catalogue.get("data") or []
+    routes = sorted({
+        str(row.get("id"))
+        for row in rows
+        if isinstance(row, dict) and str(row.get("id") or "").startswith(("video/", "session-pool/"))
+    })
+    return {
+        "status": "healthy",
+        "app": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "transport": CANONICAL_CONSUMER_BASE_URL,
+        "providers": routes,
+        "catalogue_only": True,
     }
 
 @app.get("/")
