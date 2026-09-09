@@ -154,6 +154,24 @@ class _ServicePool:
 _services = _ServicePool()
 
 
+def _production_runtime() -> bool:
+    """Read deployment mode at request time so tests and hot config agree."""
+
+    return os.getenv("APP_ENV", settings.APP_ENV).strip().lower() in {"production", "prod"}
+
+
+def _reject_mock_in_production(backend: str) -> None:
+    if backend == "mock" and _production_runtime():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "mock_backend_disabled_in_production",
+                "replacement": "/api/v1/films/crew-runs",
+                "message": "Customer production work must use the canonical consumer gateway; mock execution is development-only.",
+            },
+        )
+
+
 def _ensure_film_access(film_id: str, user: User) -> None:
     owner_id = _services.store.film_owner(film_id)
     if owner_id is None:
@@ -173,6 +191,7 @@ async def create_film(request: FilmCreateRequest, user: User = Depends(get_curre
             status_code=403,
             detail="customer film admission requires /films/crew-admissions with Director approval",
         )
+    _reject_mock_in_production(request.backend)
     if request.backend == "live" and (not request.live or request.max_clips <= 0):
         raise HTTPException(
             status_code=400,
@@ -323,6 +342,7 @@ async def tick_film(
     max_clips: int = 0,
     user: User = Depends(get_current_user),
 ):
+    _reject_mock_in_production(backend)
     if backend == "live" and (not live or max_clips <= 0):
         raise HTTPException(status_code=400, detail="live scheduling requires live=true and a positive max_clips safety cap")
     orchestrator = _services.get(backend, max_clips=max_clips)

@@ -302,6 +302,18 @@ def test_direct_audio_speech_endpoint_is_retired():
     assert response.json()["detail"]["code"] == "legacy_route_retired"
 
 
+def test_mock_film_execution_is_rejected_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    client = TestClient(app)
+    create = client.post("/api/v1/films/", json={"script": "A bounded production check."})
+    assert create.status_code == 422
+    assert create.json()["detail"]["code"] == "mock_backend_disabled_in_production"
+
+    tick = client.post("/api/v1/films/not-created/tick?backend=mock")
+    assert tick.status_code == 422
+    assert tick.json()["detail"]["code"] == "mock_backend_disabled_in_production"
+
+
 def test_projects_crud_endpoint():
     client = TestClient(app)
     # Create project
