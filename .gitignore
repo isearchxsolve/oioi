@@ -57,3 +57,10 @@ unzipped_backup/
 Thumbs.db
 .idea/
 *.swp
+
+# commit_dirty hygiene - build artifacts are never committed
+node_modules/
+__pycache__/
+*.pyc
+.tmp_*
+

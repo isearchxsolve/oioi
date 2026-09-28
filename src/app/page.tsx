@@ -114,11 +114,9 @@ export default function Home() {
 
   // ---------------------------------------------------------------- live registry data
   // Every tab below used to render a hardcoded literal while a real endpoint sat unused:
-  // the Models tab listed 30 <li> strings though /api/v1/models/ serves 75 real entries, and the
-  // Styles tab listed 12 strings under a "150+" heading though /api/v1/styles/ serves 150. Those
-  // literals also drifted from reality -- they advertised "Gemini 2.5 Flash", a model name the
-  // gateway cannot resolve at all. Fetch instead, and show load/error state rather than a
-  // reassuring fiction.
+  // Model and style lists are fetched from the authenticated API. The model endpoint is a
+  // sanitized view of the canonical consumer catalogue, so counts can change with live seat
+  // admission; never replace an unavailable response with a reassuring baked-in list.
   const [registry, setRegistry] = useState<{
     models: any | null;
     styles: any[] | null;
@@ -389,8 +387,10 @@ export default function Home() {
         id: nextId,
         title: `Scene ${nextId}: New Sequence`,
         prompt: 'Continuation of the cinematic storyline with dynamic lighting',
-        imageUrl: `https://image.pollinations.ai/prompt/anime%20scene%20sequence%20${nextId}`,
-        status: 'ready',
+        // Adding a panel is a planning action. Media is populated only by a
+        // Director-approved durable film tick; never fabricate a provider URL or
+        // mark an unrendered panel ready.
+        status: 'pending',
         aspectRatio: '16:9',
       },
     ]);
@@ -681,11 +681,11 @@ export default function Home() {
           <div className="mt-6 pt-4 border-t border-slate-800 text-[11px] text-slate-500 space-y-2">
             <div className="flex items-center justify-between">
               <span>Active Inference:</span>
-              <span className="text-slate-300 font-medium">Multi-Vendor Mesh</span>
+              <span className="text-slate-300 font-medium">Canonical Consumer Gateway</span>
             </div>
             <div className="flex items-center justify-between">
               <span>Failover State:</span>
-              <span className="text-emerald-400 font-medium">Automatic / Ready</span>
+              <span className="text-emerald-400 font-medium">Session-pool failover</span>
             </div>
           </div>
         </aside>
@@ -701,7 +701,7 @@ export default function Home() {
                     <span>Storyboard Animation Canvas</span>
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Linked multi-panel canvas with concurrent generation & first/last-frame animation
+                    Durable storyboard plans with Director-approved rendering via the consumer gateway
                   </p>
                 </div>
                 <button
@@ -758,7 +758,7 @@ export default function Home() {
                           <span>1024x1024</span>
                           <span>•</span>
                           <Video className="w-3.5 h-3.5 text-indigo-400" />
-                          <span>Veo Motion</span>
+                          <span>Consumer video route</span>
                         </div>
                         <button className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
                           <Sliders className="w-3.5 h-3.5" />
@@ -814,7 +814,7 @@ export default function Home() {
                     </span>
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Live from <code className="text-slate-500">/api/v1/models/</code>
+                     Live consumer routes from <code className="text-slate-500">127.0.0.1:8190/v1/models</code>
                   </p>
                 </div>
                 <button
@@ -998,11 +998,9 @@ export default function Home() {
                 </p>
               </div>
               
-              {/* Backed by GET /api/v1/assets/. The four cards below used to be static
-                  "No saved X" placeholders -- true-looking but unfalsifiable, since assets.py was a
-                  two-line stub with no routes at all. Characters and scenes now appear here after a
-                  pipeline run; clips are enumerated from the video router's harvest directory, so
-                  the three real generations already on disk show up immediately. */}
+               {/* Backed by GET /api/v1/assets/. Characters and scenes appear here after a
+                   pipeline run. Only app-owned local media is listed; provider/router harvest
+                   directories are intentionally outside the customer API boundary. */}
               {registry.error.assets ? (
                 <div className="p-4 rounded-2xl bg-rose-950/40 border border-rose-900 text-xs text-rose-200">
                   Could not load the library: {registry.error.assets}
@@ -1053,23 +1051,22 @@ export default function Home() {
                       <button
                         onClick={loadRegistry}
                         className="p-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300"
-                        title="Rescan the harvest directory"
+                        title="Refresh app-owned media"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${registry.loading ? 'animate-spin' : ''}`} />
                       </button>
                     </div>
                     {(registry.assets?.clips ?? []).length === 0 ? (
                       <p className="text-xs text-slate-400">
-                        No clips on disk. The Animator writes them here once a Flow or rtst account
-                        is signed in and has credits.
+                         No app-owned clips are retained yet. Completed film clips appear after a
+                         durable film scheduler tick and an ownership-checked artifact commit.
                       </p>
                     ) : (
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         {registry.assets.clips.map((c: any) => (
                           <div key={c.url} className="rounded-xl overflow-hidden bg-slate-950 border border-slate-800">
-                            {/* Real files served by GET /api/v1/assets/clips/{provider}/{name} --
-                                not the ElephantsDream.mp4 sample reel this UI used to pass off as
-                                the user's own footage. */}
+                            {/* App-owned local files are served by the ownership-checked assets route;
+                                provider harvest paths are retired and never rendered here. */}
                             <video src={c.url} controls preload="metadata" className="w-full aspect-video bg-black" />
                             <div className="p-2">
                               <p className="text-[11px] text-slate-300 truncate" title={c.name}>{c.name}</p>
